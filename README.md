@@ -43,15 +43,34 @@ Hozir narx va karta egasi `XXX`, karta raqamlari `XXXX XXXX XXXX XXXX`; oferta h
 
 Repozitoriy: https://github.com/asositgroup/neo-sisra-tolovbot
 
-`main` branchga commit/push kelganda GitHub Actions avval JavaScript va deploy testlarini bajaradi. Testlar muvaffaqiyatli boʻlsa, botning yangi versiyasi serverga yuboriladi. Pull requestlarda faqat testlar ishlaydi. GitHub saytidagi faylni tahrirlab `main` ga commit qilish ham shu jarayonni ishga tushiradi.
+Server har 60 soniyada shu repozitoriyning `main` branchini tekshiradi. Yangi commit boʻlsa, aynan oʻsha commit kodi yuklanadi, alohida yopiq muhitda JavaScript va deploy testlari bajariladi. Testlar muvaffaqiyatli boʻlsa, bot yangilanadi. GitHub saytidagi faylni tahrirlab `main` ga commit qilish ham shu jarayonni ishga tushiradi. Yangilanish odatda bir necha daqiqa ichida tugaydi; davom etayotgan yuborishlar boʻlsa, bot ularni tugatishni kutadi.
+
+Testlar alohida `neo-sisra-ci-test` foydalanuvchisi nomidan, tarmoq va bot maʼlumotlariga kirishsiz bajariladi. Testdan oʻtgan fayllarning aynan oʻzi joylashtiriladi. Repo kodi root huquqi bilan bajarilmaydi. Pull request va boshqa branchlar avtomatik joylashtirilmaydi.
 
 Har bir versiya `/opt/neo-sisra-pay-bot/releases/<commit-SHA>` papkasida saqlanadi. `current` havolasi faol versiyani koʻrsatadi. `.env` va `data` asosiy server papkasida qoladi; deploy ularni almashtirmaydi. Bot yangilanishdan oldin davom etayotgan yuborishlarni tugatishga 240 soniyagacha vaqt oladi. Juda uzoq operatsiya uzilsa, saqlangan yozuv `/retry` orqali qayta yuboriladi.
 
-Yangi botning aynan yangi ishga tushishida Telegram polling tayyorligi tekshiriladi. Tekshiruv muvaffaqiyatsiz boʻlsa, oldingi kodga qaytiladi va uning ham tayyorligi tekshiriladi. Deploylar bir vaqtda ishlamaydi. Yakuniy holatni GitHub → Actions → Bot CI and deploy orqali koʻrish mumkin; kerak boʻlsa `Run workflow` bilan `main` qayta joylashtiriladi.
+Yangi botning aynan yangi ishga tushishida Telegram polling tayyorligi tekshiriladi. Tekshiruv muvaffaqiyatsiz boʻlsa, oldingi kodga qaytiladi va uning ham tayyorligi tekshiriladi. Deploylar bir vaqtda ishlamaydi. Test yoki deploydan oʻtmagan commit har daqiqada qayta urinilmaydi: xatoni tuzatib yangi commit qilish kerak.
+
+Serverda holatni tekshirish:
+
+```sh
+systemctl status neo-sisra-bot-poll.timer neo-sisra-pay-bot.service
+journalctl -u neo-sisra-bot-poll.service -n 30 --no-pager
+journalctl -u neo-sisra-bot-tests.service -n 80 --no-pager
+readlink /opt/neo-sisra-pay-bot/current
+```
+
+Tekshiruvni kutmasdan boshlash: `sudo systemctl start neo-sisra-bot-poll.service`. Avtomatik yangilashni toʻxtatish: `sudo systemctl disable --now neo-sisra-bot-poll.timer`; bu ishlayotgan botni toʻxtatmaydi. Qayta yoqish: `sudo systemctl enable --now neo-sisra-bot-poll.timer`.
+
+Oldin xato bilan tugagan commitni aynan oʻzini qayta urinish zarur boʻlsa, sababni tekshirgandan keyin operator `/var/lib/neo-sisra-ci-test/.last-failed-sha` faylini oʻchiradi va poll xizmatini boshlaydi. Xatoni yangi commit bilan tuzatish odatda yetarli.
+
+GitHub Actions uchun workflow ham tayyor, lekin 2026-10-05 dagi birinchi ishga tushirish GitHub hisobidagi billing muammosi sabab runner boshlanmasdan rad etildi. Shuning uchun workflow vaqtincha oʻchirilgan; amaldagi avtomatik yangilash serverdagi timer orqali bajariladi. Actions holati serverdagi deploy holatini koʻrsatmaydi.
+
+Keyinchalik Actions’ga oʻtish uchun avval billingni tiklash, serverdagi timerni oʻchirish, workflow’ni yoqish va repository variable `DEPLOY_WITH_ACTIONS=true` ni oʻrnatish kerak. Ikki deploy usulini bir vaqtda yoqmang. Actions yoqilganda pull requestlarda faqat testlar, `main` da esa test va deploy ishlaydi.
 
 GitHub Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`. Alohida SSH kalitiga faqat shu botni joylashtirish komandasi ruxsat etilgan. Bot tokeni va administrator sozlamalari serverdagi yopiq `.env` faylida turadi; ularni GitHub fayllariga yozmang.
 
-Avtomatik joʻnatiladigan runtime fayllari: `bot.js`, `google-delivery.cjs`, `telegram-http.cjs`, `package.json`. Yangi runtime modul yoki npm dependency qoʻshilsa, workflow va server deploy qabul qiladigan fayllar ham moslanishi kerak. Unit/deploy mexanizmini oʻzgartirish operator orqali alohida oʻrnatiladi. Oferta yoki kirish rasmi serverda alohida saqlanib, `.env` da mutlaq yoʻl bilan koʻrsatiladi.
+Avtomatik joʻnatiladigan runtime fayllari: `bot.js`, `google-delivery.cjs`, `telegram-http.cjs`, `package.json`. Yangi runtime modul yoki npm dependency qoʻshilsa, workflow hamda serverdagi poll/deploy qabul qiladigan fayllar moslanishi kerak. Unit, test runner yoki poll/deploy mexanizmini oʻzgartirish operator orqali alohida oʻrnatiladi. Oferta yoki kirish rasmi serverda alohida saqlanib, `.env` da mutlaq yoʻl bilan koʻrsatiladi. Server ochiq GitHub repodan tokensiz oʻqiydi; repo private qilinsa, oʻqish ruxsati alohida sozlanishi kerak.
 
 Mahalliy tekshiruv: `npm run check`, `npm test`. Deploy testlari Linuxdagi Python3 bilan: `python3 -m unittest discover -s deploy/tests -v`. Tashqi runtime npm paketlari yoʻq. Node22 ishlatiladi. Testlar foydalanuvchilarga Telegram xabari yubormaydi.
 
@@ -59,7 +78,7 @@ Mahalliy tekshiruv: `npm run check`, `npm test`. Deploy testlari Linuxdagi Pytho
 
 `@neo_sisrabot` `/opt/neo-sisra-pay-bot` da alohida `neo-sisra-pay-bot.service` orqali ishga tushirildi. Tekshiruvda xizmat `active/running`, qayta ishga tushishlar soni `0`; Telegram `getMe` aynan shu botni tasdiqladi va birinchi polling javobi muvaffaqiyatli keldi. Uchta JS modulning server SHA-256 qiymatlari mahalliy fayllar bilan bir xil. Avvalgi bot kodi oʻzgarmagan va uning xizmati ham faol.
 
-31 ta mahalliy test oʻtdi. Botning Google yuborish moduli orqali alohida belgilangan `TEST Neo Sisra bot SSH 2026-10-05` yozuvi yuborildi: mavjud roʻyxatdan oʻtish varagʻida 6-qator va cheklar varagʻida 4-qator tekshirildi. Rozilik mavjud `Oferta`/`Offerta` ustunlariga tushdi. Sinov PNG fayli Drive’da bor (14803 bayt). Bu haqiqiy toʻlov emas. Telegram foydalanuvchisi bilan toʻliq jonli suhbat hali sinovdan oʻtkazilmagan.
+34 ta JavaScript testi va 62 ta Linux testi (41 deploy, 21 avtomatik tekshiruv) serverdagi alohida test muhitida oʻtdi. Botning Google yuborish moduli orqali alohida belgilangan `TEST Neo Sisra bot SSH 2026-10-05` yozuvi yuborildi: mavjud roʻyxatdan oʻtish varagʻida 6-qator va cheklar varagʻida 4-qator tekshirildi. Rozilik mavjud `Oferta`/`Offerta` ustunlariga tushdi. Sinov PNG fayli Drive’da bor (14803 bayt). Bu haqiqiy toʻlov emas. Telegram foydalanuvchisi bilan toʻliq jonli suhbat hali sinovdan oʻtkazilmagan.
 
 `/start`, `/status`, `/retry`, `/id`, `/admin` buyruqlari menyusi Telegram API orqali saqlandi va qayta oʻqib tasdiqlandi. Raqamli admin IDlari hamda bildirishnoma guruhi hali berilmagan: admin vositalari va guruhga yuborish yoqilmagan. Oferta hujjati va toʻlov rekvizitlari hamon kutilmoqda.
 
@@ -67,4 +86,4 @@ Mahalliy tekshiruv: `npm run check`, `npm test`. Deploy testlari Linuxdagi Pytho
 
 Yozuvlar `data/bot_data.json` da saqlanadi: avval vaqtinchalik fayl yoziladi, soʻng asosiy fayl atomar almashtiriladi. `data` papkasining muntazam zaxira nusxasini saqlang; izchil nusxa olish uchun xizmatni qisqa muddat toʻxtatish mumkin. Tiklangan fayllar egasi va yopiq ruxsatlarini tekshiring.
 
-Haqiqiy `.env`, `data` va eksportlar Git’ga kiritilmaydi; bot fayllari `.vercelignore` orqali sayt joylashtirishidan chiqariladi. Foydalanuvchi maʼlumotlarini saytning ochiq papkalariga koʻchirmang.
+Haqiqiy `.env`, `data` va eksportlar Git’ga kiritilmaydi. Bot sayt repozitoriysidan alohida saqlanadi. Foydalanuvchi maʼlumotlarini saytning ochiq papkalariga koʻchirmang.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Automatically check Neo Sisra bot GitHub changes
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=neo-sisra-bot-poll.service
+
+[Install]
+WantedBy=timers.target

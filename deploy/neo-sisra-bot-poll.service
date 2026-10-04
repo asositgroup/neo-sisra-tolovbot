@@ -1,0 +1,16 @@
+[Unit]
+Description=Check GitHub main and deploy the tested Neo Sisra bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/neo-sisra-bot-poll
+TimeoutStartSec=30min
+TimeoutStopSec=15min
+KillMode=control-group
+UMask=0077
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/neo-sisra-ci-test /opt/neo-sisra-pay-bot /run/lock
