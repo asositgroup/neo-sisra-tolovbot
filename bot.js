@@ -1,0 +1,985 @@
+const fs = require('fs');
+const path = require('path');
+
+const BASE_DIR = __dirname;
+
+function loadEnv() {
+  const envPath = path.join(BASE_DIR, '.env');
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || !line.includes('=')) continue;
+    const [key, ...rest] = line.split('=');
+    if (!process.env[key.trim()]) {
+      process.env[key.trim()] = rest.join('=').trim().replace(/^['"]|['"]$/g, '');
+    }
+  }
+}
+
+loadEnv();
+
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(BASE_DIR, 'data'));
+const DB_PATH = path.join(DATA_DIR, 'bot_data.json');
+const EXPORT_PATH = path.join(DATA_DIR, 'neo-sisra-pay-export.xls');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const BOT_TOKEN = (process.env.BOT_TOKEN || '').trim();
+const GOOGLE_SCRIPT_URL = (process.env.GOOGLE_SCRIPT_URL || '').trim();
+function splitCsv(value) {
+  return String(value || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+const PRIMARY_ADMIN_IDS = splitCsv(process.env.PRIMARY_ADMIN_IDS || process.env.ADMIN_IDS);
+const EXTRA_ADMIN_IDS = splitCsv(process.env.EXTRA_ADMIN_IDS);
+const ADMIN_IDS = [...new Set([...PRIMARY_ADMIN_IDS, ...EXTRA_ADMIN_IDS])];
+const { createGoogleDelivery, validateReceipt } = require('./google-delivery.cjs');
+const { fetchJson, fetchBytes } = require('./telegram-http.cjs');
+const google = createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
+const WELCOME_IMAGE_PATH = process.env.WELCOME_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.WELCOME_IMAGE_PATH) : '';
+const OFFER_DOC_PATH = process.env.OFFER_DOC_PATH ? path.resolve(BASE_DIR, process.env.OFFER_DOC_PATH) : '';
+const OFFER_VERSION = process.env.OFFER_VERSION || 'pending-2026-10-04';
+const API = 'https://api.telegram.org/bot' + BOT_TOKEN;
+const FILE_API = 'https://api.telegram.org/file/bot' + BOT_TOKEN;
+const NOTIFY_CHAT_ID = (process.env.NOTIFY_CHAT_ID || '').trim();
+const NOTIFY_REG_TOPIC = Number(process.env.NOTIFY_REG_TOPIC || 0);
+const NOTIFY_PAY_TOPIC = Number(process.env.NOTIFY_PAY_TOPIC || 0);
+const TELEGRAM_TIMEOUT_MS = 15000;
+const TELEGRAM_FILE_TIMEOUT_MS = 30000;
+const POLL_TIMEOUT_SECONDS = 25;
+const POLL_FETCH_TIMEOUT_MS = 35000;
+const SERVICE_NAME = 'Koreyaga talaba yuborish';
+const CONTACT_PHONE = process.env.CONTACT_PHONE || 'XXX';
+const CONTACT_ADMIN = process.env.CONTACT_ADMIN || '';
+const CHANNEL_URL = 'https://t.me/+q9W8PHE9qzpiZDQ1';
+const SERVICE_PRICE = process.env.SERVICE_PRICE || 'XXX';
+const PAYMENT_CARDS = [
+  { bank: 'UZCARD', number: process.env.UZCARD_NUMBER || 'XXXX XXXX XXXX XXXX', holder: process.env.UZCARD_HOLDER || 'XXX' },
+  { bank: 'Visa', number: process.env.VISA_NUMBER || 'XXXX XXXX XXXX XXXX', holder: process.env.VISA_HOLDER || 'XXX' },
+];
+const WELCOME_BUTTONS = ["💳 To'lov qilish uchun ro'yxatdan o'tish"];
+const pendingTasks = new Set();
+const registrationFlights = new Set();
+const paymentFlights = new Set();
+function safeError(error) {
+  return String(error?.message || error || 'Xatolik').replace(/https?:\/\/api\.telegram\.org\/[^\s"']+/g, '[Telegram API]').replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g, '[TOKEN]');
+}
+function profileFor(row) {
+  return {name:row.name, phone:row.phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
+}
+function contactText() {
+  return ['☎️ Telefon: '+escHtml(CONTACT_PHONE), CONTACT_ADMIN ? escHtml(CONTACT_ADMIN) : '', '<a href="'+CHANNEL_URL+'">Neo Sisra Telegram kanali</a>'].filter(Boolean).join('\n');
+}
+function retryKeyboard() {
+  return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
+}
+
+function emptyDb() {
+  return {
+    users: {},
+    registrations: [],
+    payments: [],
+    admin_chat_ids: [],
+    last_update_id: 0,
+  };
+}
+
+function loadDb() {
+  if (!fs.existsSync(DB_PATH)) return emptyDb();
+  try {
+    const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    return { ...emptyDb(), ...data };
+  } catch {
+    throw new Error('Bot maʼlumotlarini oʻqib boʻlmadi. Saqlangan faylni tekshiring.');
+  }
+}
+
+function saveDb(db) {
+  const tmp = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
+  fs.renameSync(tmp, DB_PATH);
+}
+
+function pad(value) {
+  return String(value).padStart(2, '0');
+}
+
+function nowParts() {
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date()).map(p=>[p.type,p.value]));
+  return {full:parts.day+'.'+parts.month+'.'+parts.year+' '+parts.hour+':'+parts.minute+':'+parts.second,date:parts.year+'-'+parts.month+'-'+parts.day,time:parts.hour+':'+parts.minute+':'+parts.second};
+}
+
+async function tg(method, data = {}) {
+  if (!BOT_TOKEN) throw new Error('BOT_TOKEN .env faylida yoq');
+  const payload = await fetchJson(
+    `${API}/${method}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(data),
+    },
+    TELEGRAM_TIMEOUT_MS,
+    `Telegram ${method}`,
+  );
+  if (!payload.ok) throw new Error('Telegram soʻrovi bajarilmadi (kod '+Number(payload.error_code||0)+').');
+  return payload.result;
+}
+
+async function tgMultipart(method, form) {
+  const payload = await fetchJson(
+    `${API}/${method}`,
+    { method: 'POST', body: form },
+    TELEGRAM_FILE_TIMEOUT_MS,
+    `Telegram ${method}`,
+  );
+  if (!payload.ok) throw new Error('Telegram fayl soʻrovi bajarilmadi (kod '+Number(payload.error_code||0)+').');
+  return payload.result;
+}
+
+function keyboard(rows, oneTime = false) {
+  return { keyboard: rows, resize_keyboard: true, one_time_keyboard: oneTime };
+}
+
+function removeKeyboard() {
+  return { remove_keyboard: true };
+}
+
+async function sendMessage(chatId, text, replyMarkup, extra = {}) {
+  const data = { chat_id: chatId, text, ...extra };
+  if (replyMarkup) data.reply_markup = replyMarkup;
+  return tg('sendMessage', data);
+}
+
+async function sendHtml(chatId, text, replyMarkup) {
+  const data = { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true };
+  if (replyMarkup) data.reply_markup = replyMarkup;
+  return tg('sendMessage', data);
+}
+
+async function sendDocument(chatId, filePath, caption = '') {
+  const bytes = fs.readFileSync(filePath);
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) form.append('caption', caption);
+  form.append('document', new Blob([bytes]), path.basename(filePath));
+  return tgMultipart('sendDocument', form);
+}
+
+async function sendPhoto(chatId, filePath, caption = '', replyMarkup) {
+  const bytes = fs.readFileSync(filePath);
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) {
+    form.append('caption', caption);
+    form.append('parse_mode', 'HTML');
+  }
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+  form.append('photo', new Blob([bytes]), path.basename(filePath));
+  return tgMultipart('sendPhoto', form);
+}
+
+function normalizePhone(text) {
+  const raw=String(text||'').trim();
+  if (!/^\+?[\d ()-]+$/.test(raw)) return null;
+  let digits=raw.replace(/\D/g,'');
+  if (!raw.startsWith('+') && digits.length===9) digits='998'+digits;
+  if(digits.startsWith('998')) return digits.length===12 ? '+'+digits : null;
+  return raw.startsWith('+') && /^[1-9]\d{6,14}$/.test(digits) ? '+'+digits : null;
+}
+
+function userKey(chatId) {
+  return String(chatId);
+}
+
+function isPrimaryAdmin(from) {
+  return PRIMARY_ADMIN_IDS.includes(String(from?.id || ''));
+}
+
+function isAdminUser(from) {
+  const id = String(from?.id || '');
+  return ADMIN_IDS.includes(id);
+}
+
+function isAdmin(message) {
+  return isAdminUser(message.from) || ADMIN_IDS.includes(String(message.chat?.id || ''));
+}
+
+function registerAdmin(db, chatId) {
+  if (!db.admin_chat_ids.includes(chatId)) db.admin_chat_ids.push(chatId);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clearBroadcast(db) {
+  db.broadcast = null;
+}
+
+function registeredChatIds(db) {
+  const ids = new Set();
+  for (const row of db.registrations || []) {
+    const id = Number(row.telegram_id);
+    if (Number.isFinite(id) && id > 0) ids.add(id);
+  }
+  return [...ids];
+}
+
+function newItemId() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function itemPreview(message) {
+  const cut = (s, n = 80) => {
+    const t = String(s || '').replace(/\s+/g, ' ').trim();
+    return t.length > n ? `${t.slice(0, n)}…` : t;
+  };
+  if (message.text) return `Matn: ${cut(message.text)}`;
+  if (message.photo) return message.caption ? `Rasm: ${cut(message.caption, 60)}` : 'Rasm';
+  if (message.video) return message.caption ? `Video: ${cut(message.caption, 60)}` : 'Video';
+  if (message.document) {
+    const name = message.document.file_name || 'fayl';
+    return message.caption ? `Fayl: ${cut(name, 40)} — ${cut(message.caption, 40)}` : `Fayl: ${cut(name, 50)}`;
+  }
+  if (message.audio) return 'Audio';
+  if (message.voice) return 'Ovozli xabar';
+  if (message.animation) return 'GIF';
+  if (message.sticker) return 'Stiker';
+  if (message.video_note) return 'Video-xabar';
+  if (message.caption) return cut(message.caption);
+  return 'Xabar';
+}
+
+function isBroadcastable(message) {
+  return Boolean(
+    (message.text && !message.text.startsWith('/')) ||
+      message.photo ||
+      message.document ||
+      message.video ||
+      message.animation ||
+      message.audio ||
+      message.voice ||
+      message.sticker ||
+      message.video_note,
+  );
+}
+
+function collectKeyboard() {
+  return keyboard([['✅ Yuborish'], ['❌ Bekor qilish']]);
+}
+
+function assetButtons(itemId, index, total) {
+  const row = [];
+  if (index > 0) row.push({ text: '⬆️ Yuqoriga', callback_data: `bc:up:${itemId}` });
+  if (index < total - 1) row.push({ text: '⬇️ Pastga', callback_data: `bc:dn:${itemId}` });
+  row.push({ text: "🗑 O'chirish", callback_data: `bc:del:${itemId}` });
+  return [row];
+}
+
+async function answerCb(id, text) {
+  try {
+    const data = { callback_query_id: id };
+    if (text) data.text = text;
+    await tg('answerCallbackQuery', data);
+  } catch {
+    // callback muddati o'tgan bo'lishi mumkin
+  }
+}
+
+async function refreshAssetControls(db, chatId) {
+  const b = db.broadcast;
+  if (!b || !Array.isArray(b.items)) return;
+  const n = b.items.length;
+  for (let i = 0; i < n; i += 1) {
+    const item = b.items[i];
+    if (!item.controlMessageId) continue;
+    try {
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: item.controlMessageId,
+        text: `#${i + 1}/${n}  ${item.preview}`,
+        reply_markup: { inline_keyboard: assetButtons(item.id, i, n) },
+      });
+    } catch {
+      try {
+        await tg('editMessageReplyMarkup', {
+          chat_id: chatId,
+          message_id: item.controlMessageId,
+          reply_markup: { inline_keyboard: assetButtons(item.id, i, n) },
+        });
+      } catch {
+        // eski xabar o'chirilgan
+      }
+    }
+  }
+}
+
+async function addBroadcastItem(db, message) {
+  const chatId = message.chat.id;
+  const b = db.broadcast;
+  if (!b.items) b.items = [];
+  const item = {
+    id: newItemId(),
+    srcMessageId: message.message_id,
+    preview: itemPreview(message),
+    controlMessageId: null,
+  };
+  b.items.push(item);
+  const n = b.items.length;
+  const ctrl = await sendMessage(
+    chatId,
+    `#${n}/${n}  ${item.preview}`,
+    { inline_keyboard: assetButtons(item.id, n - 1, n) },
+    { reply_to_message_id: message.message_id },
+  );
+  item.controlMessageId = ctrl.message_id;
+  await refreshAssetControls(db, chatId);
+}
+
+function runInBackground(label, fn) {
+  const task=Promise.resolve().then(fn).catch(err=>console.error(label+': '+safeError(err))).finally(()=>pendingTasks.delete(task));
+  pendingTasks.add(task);
+}
+function newRegistration(db, profile) {
+  const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
+  db.registrations.push(row);
+  saveDb(db);
+  return row;
+}
+async function deliverRegistration(db,row) {
+  if(row.status==='sent' || registrationFlights.has(row.id)) return;
+  registrationFlights.add(row.id);
+  try {
+    row.status='sending'; saveDb(db);
+    await google.sendRegistration(profileFor(row));
+    row.status='sent'; row.google_result={ok:true};
+  } catch(error) {
+    row.status='failed'; row.google_result={ok:false,error:'Sheets yuborish tasdiqlanmadi'};
+    console.error('Registration: '+safeError(error));
+    try { await sendMessage(row.telegram_id,'Maʼlumotlaringiz saqlandi, lekin jadvalga yetkazilgani tasdiqlanmadi. 🔄 Qayta yuborish tugmasini bosishingiz mumkin.',retryKeyboard()); } catch(error) { console.error(safeError(error)); }
+  } finally { saveDb(db); registrationFlights.delete(row.id); }
+  if(!row.notified && NOTIFY_CHAT_ID) {
+    row.notified=await notifyLeadChat('reg',row); saveDb(db);
+  }
+}
+function extractReceipt(message) {
+  if(message.photo?.length) {
+    const photo=message.photo[message.photo.length-1];
+    return {kind:'photo',fileId:photo.file_id,uniqueId:photo.file_unique_id||photo.file_id,fileName:'receipt.jpg',mimeType:'image/jpeg',fileSize:photo.file_size||0};
+  }
+  const d=message.document;
+  if(d && ['image/png','image/jpeg','application/pdf'].includes(d.mime_type) && /\.(png|jpe?g|pdf)$/i.test(d.file_name||'')) {
+    return {kind:'document',fileId:d.file_id,uniqueId:d.file_unique_id||d.file_id,fileName:d.file_name||'receipt',mimeType:d.mime_type,fileSize:d.file_size||0};
+  }
+  return null;
+}
+async function downloadReceipt(receipt) {
+  const info=await tg('getFile',{file_id:receipt.fileId});
+  if(receipt.fileSize>10*1024*1024 || info.file_size>10*1024*1024) throw new Error('Chek hajmi 10 MB dan oshmasligi kerak.');
+  if(!info.file_path || !/^[\w./-]+$/.test(info.file_path) || info.file_path.includes('..')) throw new Error('Telegram fayl manzili notoʻgʻri.');
+  const bytes=await fetchBytes(FILE_API+'/'+info.file_path,{method:'GET'},TELEGRAM_FILE_TIMEOUT_MS);
+  return validateReceipt(bytes,receipt.fileName,receipt.mimeType);
+}
+async function deliverPayment(db,row) {
+  if(row.status==='sent' || paymentFlights.has(row.id)) return;
+  paymentFlights.add(row.id);
+  try {
+    row.status='sending'; saveDb(db);
+    const file=await downloadReceipt(row.receipt);
+    const result=await google.sendReceipt(profileFor(row),file);
+    row.check_url=result.fileUrl; row.check_url_google=result.fileUrl;
+    row.google_result={ok:true,fileUrl:result.fileUrl}; row.status='sent';
+    saveDb(db);
+  } catch(error) {
+    row.status=error.code==='INVALID_RECEIPT'?'invalid':'failed'; row.google_result={ok:false,error:'Chek yetkazilgani tasdiqlanmadi'};
+    saveDb(db);
+    console.error('Receipt: '+safeError(error));
+    try { await sendMessage(row.telegram_id,row.status==='invalid'?'Chek faylining formati notoʻgʻri. PNG, JPG yoki PDF formatidagi boshqa faylni yuboring.':'Chek yetkazilgani tasdiqlanmadi. 🔄 Qayta yuborish tugmasini bosishingiz mumkin. Oldingi urinish yetib borgan boʻlsa, takroriy yozuv paydo boʻlishi mumkin.',row.status==='invalid'?undefined:retryKeyboard()); } catch(error) { console.error(safeError(error)); }
+  } finally { paymentFlights.delete(row.id); }
+  if(row.status==='sent') {
+    if(!row.notified && NOTIFY_CHAT_ID) { row.notified=await notifyLeadChat('pay',row,{[row.receipt.kind==='photo'?'photo':'document']:row.receipt.kind==='photo'?[{file_id:row.receipt.fileId,file_unique_id:row.receipt.uniqueId}]:{file_id:row.receipt.fileId,mime_type:row.receipt.mimeType,file_name:row.receipt.fileName}});saveDb(db); }
+    try { await sendMessage(row.telegram_id,'✅ Chekingiz tekshirish uchun yuborildi. Natija boʻyicha siz bilan bogʻlanamiz.',keyboard([['📋 Holat']])); } catch(error) { console.error(safeError(error)); }
+  }
+}
+function paymentText() {
+  const cards=PAYMENT_CARDS.map(c=>'<b>'+escHtml(c.bank)+'</b>\n<code>'+escHtml(c.number)+'</code>\nKarta egasi: '+escHtml(c.holder)).join('\n\n');
+  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.','',contactText()].join('\n');
+}
+
+function xmlCell(value) {
+  const escaped = String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return `<Cell><Data ss:Type="String">${escaped}</Data></Cell>`;
+}
+
+function xmlRow(values) {
+  return `<Row>${values.map(xmlCell).join('')}</Row>`;
+}
+
+function xmlSheet(name, rows) {
+  return `<Worksheet ss:Name="${name}"><Table>${rows.map(xmlRow).join('')}</Table></Worksheet>`;
+}
+
+function exportExcel(db) {
+  const regRows = [
+    ['Ism', 'Telefon raqam', 'Tarif', 'Oferta', 'Sana', 'Telegram ID', 'Username'],
+    ...db.registrations.map((r) => [r.name, r.phone, r.tariff, r.offer, r.date, r.telegram_id, r.username]),
+  ];
+  const payRows = [
+    ['Ism', 'Telefon raqam', 'Tarif', 'Oferta', 'Check URL', 'Sana', 'vaqt', 'Telegram ID', 'Username'],
+    ...db.payments.map((r) => [r.name, r.phone, r.tariff, r.offer, r.check_url, r.date, r.time, r.telegram_id, r.username]),
+  ];
+  const xml = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+${xmlSheet('Royhatdan otganlar', regRows)}
+${xmlSheet('Chek Yuborganlar', payRows)}
+</Workbook>`;
+  fs.writeFileSync(EXPORT_PATH, xml, 'utf8');
+  return EXPORT_PATH;
+}
+
+const NAME_PROMPT = [
+  "📋 <b>Ro'yxatdan o'tish uchun ismingizni kiriting!</b>",
+  '',
+  "✍️ <b>Masalan:</b> Zebo Aliyeva",
+].join('\n');
+const NAME_MAX_LEN = 100;
+
+function isPlainNameText(message) {
+  if (!message.text || message.text.startsWith('/')) return false;
+  if (
+    message.photo ||
+    message.document ||
+    message.video ||
+    message.animation ||
+    message.audio ||
+    message.voice ||
+    message.sticker ||
+    message.video_note ||
+    message.contact ||
+    message.location
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function askName(chatId) {
+  await sendHtml(chatId, NAME_PROMPT, removeKeyboard());
+}
+
+async function askPhone(chatId) {
+  await sendHtml(
+    chatId,
+    [
+      "📱 <b>Telefon raqamingizni yuboring.</b>",
+      '',
+      "Pastdagi tugma orqali yuborishingiz yoki +998 formatida yozishingiz mumkin.",
+    ].join('\n'),
+    keyboard([[{ text: '📱 Telefon raqamni yuborish', request_contact: true }]], true),
+  );
+}
+
+async function askOffer(chatId) {
+  await sendHtml(chatId,'Davom etish uchun oferta shartlariga roziligingizni tasdiqlang.',{inline_keyboard:[[{text:'Oferta shartlarini oʻqish',callback_data:'offer:read'}],[{text:'✅ Roziman',callback_data:'offer:yes'},{text:'Rozimasman',callback_data:'offer:no'}]]});
+}
+
+async function startRegistration(db, chatId, message) {
+  db.users[userKey(chatId)] = {
+    chat_id: chatId,
+    username: message.from?.username || '',
+    step: 'name',
+  };
+  await sendHtml(chatId,'<b>Neo Sisra</b>\nKoreyada oʻqish va oʻqish davrida rasmiy ishlash imkoniyatlari.\nKoreyaga talaba yuborish va hujjatlarni rasmiylashtirish xizmati.\n\n<b>50 kishi uchun maxsus taklif</b>');
+  if(WELCOME_IMAGE_PATH && fs.existsSync(WELCOME_IMAGE_PATH)) await sendPhoto(chatId,WELCOME_IMAGE_PATH);
+  await askName(chatId);
+}
+
+function adminKeyboard() {
+  return keyboard([
+    ['📥 Excel yuklash', '📊 Statistika'],
+    ['📣 Xabar yuborish'],
+  ]);
+}
+
+async function adminPanel(chatId) {
+  await sendMessage(chatId, "Admin bo'limi", adminKeyboard());
+}
+
+async function copyOne(chatId, fromChatId, messageId) {
+  try {
+    await tg('copyMessage', {
+      chat_id: chatId,
+      from_chat_id: fromChatId,
+      message_id: messageId,
+    });
+    return true;
+  } catch (err) {
+    const raw = String(err.message || '');
+    if (raw.includes('429')) {
+      await sleep(3000);
+      try {
+        await tg('copyMessage', {
+          chat_id: chatId,
+          from_chat_id: fromChatId,
+          message_id: messageId,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
+async function runBroadcast(db, adminChatId) {
+  const b = db.broadcast || {};
+  const items = Array.isArray(b.items) ? b.items.slice() : [];
+  const fromChatId = b.fromChatId;
+  const ids = registeredChatIds(db).filter((id) => id !== adminChatId);
+  clearBroadcast(db);
+  if (!fromChatId || !items.length) {
+    await sendMessage(adminChatId, "Yuborish uchun material yo'q.", adminKeyboard());
+    return;
+  }
+  await sendMessage(
+    adminChatId,
+    `${ids.length} ta foydalanuvchiga ${items.length} ta material yuborilmoqda...`,
+    adminKeyboard(),
+  );
+  let ok = 0;
+  let fail = 0;
+  for (const id of ids) {
+    let delivered = 0;
+    for (const item of items) {
+      const sent = await copyOne(id, fromChatId, item.srcMessageId);
+      if (!sent) break;
+      delivered += 1;
+      await sleep(35);
+    }
+    if (delivered === items.length) ok += 1;
+    else fail += 1;
+    await sleep(40);
+  }
+  await sendMessage(
+    adminChatId,
+    `Tayyor.\nYuborildi: ${ok}\nYetib bormadi: ${fail} (bloklagan yoki /start bosmagan)`,
+    adminKeyboard(),
+  );
+}
+
+async function handleAdmin(message, db) {
+  const chatId = message.chat.id;
+  const text = (message.text || '').trim();
+  const b = db.broadcast;
+  const collecting = Boolean(b && b.step === 'collecting' && b.fromChatId === chatId);
+
+  if (/^\/start(?:\s|$)/.test(text) || text === 'Qayta boshlash' || WELCOME_BUTTONS.includes(text)) {
+    clearBroadcast(db);
+    return false;
+  }
+
+  if (['❌ Bekor qilish', 'Bekor qilish', '/cancel'].includes(text)) {
+    if (b) {
+      clearBroadcast(db);
+      await sendMessage(chatId, 'Xabar yuborish bekor qilindi.', adminKeyboard());
+      return true;
+    }
+  }
+
+  if (['/admin', 'Admin', 'admin'].includes(text)) {
+    clearBroadcast(db);
+    await adminPanel(chatId);
+    return true;
+  }
+
+  if (text === '📣 Xabar yuborish' || text === '/broadcast') {
+    const n = registeredChatIds(db).length;
+    db.broadcast = { step: 'collecting', fromChatId: chatId, items: [] };
+    await sendHtml(
+      chatId,
+      [
+        `Ro'yxatdan o'tgan <b>${n}</b> ta foydalanuvchiga xabar ketadi.`,
+        '',
+        "Materiallarni birin-ketin yuboring — matn, rasm, video yoki istalgan fayl.",
+        "Har birining ostida ⬆️ ⬇️ 🗑 tugmalari chiqadi.",
+        '',
+        "Hammasi tayyor bo'lgach <b>✅ Yuborish</b> ni bosing.",
+      ].join('\n'),
+      collectKeyboard(),
+    );
+    return true;
+  }
+
+  if (collecting) {
+    if (text === '✅ Yuborish' || text === 'Yuborish') {
+      if (!b.items.length) {
+        await sendMessage(chatId, "Avval kamida bitta material yuboring.", collectKeyboard());
+        return true;
+      }
+      await runBroadcast(db, chatId);
+      return true;
+    }
+    if (['📊 Statistika', '📥 Excel yuklash', '/export', '📣 Xabar yuborish'].includes(text)) {
+      await sendMessage(
+        chatId,
+        "Hozir material yig'ilmoqda. Avval ✅ Yuborish yoki ❌ Bekor qilish ni bosing.",
+        collectKeyboard(),
+      );
+      return true;
+    }
+    if (isBroadcastable(message)) {
+      await addBroadcastItem(db, message);
+      return true;
+    }
+    await sendMessage(
+      chatId,
+      "Matn, rasm, video yoki fayl yuboring. Tayyor bo'lsa ✅ Yuborish.",
+      collectKeyboard(),
+    );
+    return true;
+  }
+
+  if (text === '📊 Statistika') {
+    await sendMessage(
+      chatId,
+      `Ro'yxatdan o'tganlar: ${db.registrations.length}\nChek yuborganlar: ${db.payments.length}`,
+    );
+    return true;
+  }
+  if (text === '📥 Excel yuklash' || text === '/export') {
+    const filePath = exportExcel(db);
+    await sendDocument(chatId, filePath, "Ro'yxatdan o'tganlar va chek yuborganlar eksporti");
+    return true;
+  }
+  return false;
+}
+
+async function handleOfferCallback(cb,db) {
+  const chatId=cb.message?.chat?.id;
+  const profile=db.users[userKey(chatId)];
+  if(cb.message?.chat?.type!=='private' || cb.from?.id!==chatId || !profile || profile.step!=='offer') {await answerCb(cb.id,'Avval maʼlumotlaringizni kiriting.');return;}
+  if(cb.data==='offer:read') {
+    await answerCb(cb.id);
+    if(OFFER_DOC_PATH && fs.existsSync(OFFER_DOC_PATH)) await sendDocument(chatId,OFFER_DOC_PATH,'Neo Sisra — ommaviy oferta');
+    return;
+  }
+  if(cb.data!=='offer:yes') {
+    await answerCb(cb.id,'Davom etish uchun rozilik kerak.');
+    await askOffer(chatId);return;
+  }
+  profile.offerAccepted=true;profile.offerVersion=OFFER_VERSION;profile.tariff=SERVICE_NAME;profile.step='receipt';
+  const row=newRegistration(db,profile);
+  runInBackground('registration',()=>deliverRegistration(db,row));
+  await answerCb(cb.id,'Roziligingiz qabul qilindi');
+  await sendHtml(chatId,paymentText(profile),removeKeyboard());
+}
+
+async function handleCallback(cb, db) {
+  const data = String(cb.data || '');
+  if (data.startsWith('offer:')) {
+    await handleOfferCallback(cb, db);
+    return;
+  }
+  if (!isAdminUser(cb.from)) {
+    await answerCb(cb.id, "Siz admin emassiz");
+    return;
+  }
+  const b = db.broadcast;
+  const m = data.match(/^bc:(up|dn|del):(.+)$/);
+  if (!m || !b || b.step !== 'collecting' || b.fromChatId !== cb.message?.chat?.id || cb.from?.id !== b.fromChatId) {
+    await answerCb(cb.id, "Yig'ish yakunlangan");
+    return;
+  }
+  const action = m[1];
+  const itemId = m[2];
+  const items = b.items || [];
+  const idx = items.findIndex((x) => x.id === itemId);
+  if (idx < 0) {
+    await answerCb(cb.id, "Material topilmadi");
+    return;
+  }
+  if (action === 'up') {
+    if (idx === 0) {
+      await answerCb(cb.id, 'Allaqachon birinchi');
+      return;
+    }
+    const tmp = items[idx - 1];
+    items[idx - 1] = items[idx];
+    items[idx] = tmp;
+    await refreshAssetControls(db, b.fromChatId);
+    await answerCb(cb.id, "Yuqoriga ko'tarildi");
+    return;
+  }
+  if (action === 'dn') {
+    if (idx >= items.length - 1) {
+      await answerCb(cb.id, 'Allaqachon oxirgi');
+      return;
+    }
+    const tmp = items[idx + 1];
+    items[idx + 1] = items[idx];
+    items[idx] = tmp;
+    await refreshAssetControls(db, b.fromChatId);
+    await answerCb(cb.id, 'Pastga tushirildi');
+    return;
+  }
+  if (action === 'del') {
+    const [removed] = items.splice(idx, 1);
+    try {
+      await tg('deleteMessage', {
+        chat_id: b.fromChatId,
+        message_id: removed.controlMessageId,
+      });
+    } catch {
+      // control xabar o'chirilgan
+    }
+    await refreshAssetControls(db, b.fromChatId);
+    await answerCb(cb.id, "O'chirildi");
+  }
+}
+
+function escHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function dash(value) {
+  const s = String(value ?? '').trim();
+  return s || '-';
+}
+
+function formatUsername(username) {
+  const s = String(username || '').replace(/^@/, '').trim();
+  return s ? `@${s}` : '-';
+}
+
+function formatTelegramIdLink(telegramId) {
+  const id = String(telegramId || '').replace(/[^\d-]/g, '');
+  if (!id) return '-';
+  return `<a href="tg://user?id=${id}">${escHtml(id)}</a>`;
+}
+
+function leadReport(row,title,withCheck=false) {
+  return [title,'','<b>Ism Familiya:</b> '+escHtml(dash(row.name)),'<b>Telefon:</b> '+escHtml(dash(row.phone)),'<b>Xizmat:</b> '+SERVICE_NAME,'<b>Oferta:</b> '+escHtml(row.offer),'<b>Telegram ID:</b> '+formatTelegramIdLink(row.telegram_id),'<b>Telegram:</b> '+escHtml(formatUsername(row.username)),'<b>Sheets:</b> '+(row.status==='sent'?'Yuborildi':'Yuborish tasdiqlanmadi'),...(withCheck?['<b>Chek (Google Drive):</b>',escHtml(row.check_url_google||'—')]:[])].join('\n');
+}
+
+async function sendToTopic(threadId, text) {
+  return tg('sendMessage', {
+    chat_id: NOTIFY_CHAT_ID,
+    ...(threadId ? {message_thread_id:Number(threadId)} : {}),
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  });
+}
+
+async function sendReceiptToTopic(threadId, sourceMessage, caption) {
+  const receipt = extractReceipt(sourceMessage);
+  const data = {
+    chat_id: NOTIFY_CHAT_ID,
+    ...(threadId ? {message_thread_id:Number(threadId)} : {}),
+    caption: caption.slice(0, 1024),
+    parse_mode: 'HTML',
+  };
+  if (receipt?.kind === 'photo') {
+    return tg('sendPhoto', { ...data, photo: receipt.fileId });
+  }
+  if (receipt?.kind === 'video') {
+    return tg('sendVideo', { ...data, video: receipt.fileId });
+  }
+  if (receipt?.kind === 'document') {
+    return tg('sendDocument', { ...data, document: receipt.fileId });
+  }
+  return sendToTopic(threadId, caption);
+}
+
+async function notifyLeadChat(kind, row, sourceMessage) {
+  if (!NOTIFY_CHAT_ID) return false;
+  const isPay = kind === 'pay';
+  const threadId = isPay ? NOTIFY_PAY_TOPIC : NOTIFY_REG_TOPIC;
+  const title = isPay ? '💳 <b>Chek yuborildi</b>' : "✅ <b>Ro'yxatdan o'tdi</b>";
+  const text = leadReport(row, title, isPay);
+  try {
+    if (isPay && sourceMessage) {
+      await sendReceiptToTopic(threadId, sourceMessage, text);
+      return true;
+    }
+    await sendToTopic(threadId, text);
+    return true;
+  } catch (err) {
+    console.error(`Guruhga xabar ketmadi (topic ${threadId}): ${safeError(err)}`);
+  }
+}
+
+async function handleMessage(message,db) {
+  if(message.chat?.type!=='private') return;
+  const chatId=message.chat.id;
+  const text=(message.text||'').trim();
+  if(text==='/id') {await sendMessage(chatId,'Sizning Telegram ID: '+message.from.id);return;}
+  if(isAdmin(message)) {registerAdmin(db,chatId);if(await handleAdmin(message,db))return;}
+  if(/^\/start(?:\s|$)/.test(text) || text==='Qayta boshlash' || WELCOME_BUTTONS.includes(text)) {await startRegistration(db,chatId,message);return;}
+  const profile=db.users[userKey(chatId)];
+  if(!profile) {await startRegistration(db,chatId,message);return;}
+  if(text==='🔄 Qayta yuborish' || text==='/retry') {
+    const rows=[...db.registrations,...db.payments].filter(row=>row.telegram_id===chatId && ['pending','sending','failed'].includes(row.status));
+    if(!rows.length) {await sendMessage(chatId,'Qayta yuboriladigan maʼlumot yoʻq.');return;}
+    await sendMessage(chatId,'Qayta yuborish boshlandi. Natija shu yerda chiqadi.');
+    for(const row of rows)runInBackground('retry',()=>row.receipt?deliverPayment(db,row):deliverRegistration(db,row));
+    return;
+  }
+  if(text==='📋 Holat' || text==='/status') {
+    const row=[...db.payments].reverse().find(row=>row.telegram_id===chatId);
+    const registration=[...db.registrations].reverse().find(item=>item.telegram_id===chatId);
+    if(!row && registration && registration.status!=='sent') {await sendMessage(chatId,registration.status==='sending'?'Maʼlumotlaringiz jadvalga yuborilyapti.':'Maʼlumotlaringiz jadvalga yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.',retryKeyboard());return;}
+    await sendMessage(chatId,row?(row.status==='sent'?'Chekingiz tekshirish uchun yuborilgan. Toʻlov natijasi boʻyicha siz bilan bogʻlanamiz.':row.status==='sending'?'Chekingiz yuborilyapti. Natija shu yerda chiqadi.':'Chek yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.'):'Hali chek yubormagansiz.',row && row.status!=='sent'?retryKeyboard():undefined);return;
+  }
+  if(profile.step==='name') {
+    if(!isPlainNameText(message)||!text||/[\u0000-\u001f\u007f]/.test(text)) {await askName(chatId);return;}
+    if(text.length>NAME_MAX_LEN) {await sendMessage(chatId,'Ism '+NAME_MAX_LEN+' belgidan oshmasin.');return;}
+    profile.name=text;profile.step='phone';saveDb(db);await askPhone(chatId);return;
+  }
+  if(profile.step==='phone') {
+    if(message.contact?.user_id && message.contact.user_id!==message.from?.id) {await sendMessage(chatId,'Oʻzingizning telefon raqamingizni yuboring.');return;}
+    const phone=normalizePhone(message.contact?.phone_number||text);
+    if(!phone) {await sendMessage(chatId,'Telefon raqamni +998901234567 formatida yuboring.');return;}
+    profile.phone=phone;profile.step='offer';saveDb(db);await askOffer(chatId);return;
+  }
+  if(profile.step==='offer') {await askOffer(chatId);return;}
+  if(profile.step==='receipt'||profile.step==='done') {
+    if(!profile.offerAccepted || profile.offerVersion!==OFFER_VERSION) {profile.step='offer';saveDb(db);await askOffer(chatId);return;}
+    const receipt=extractReceipt(message);
+    if(!receipt||receipt.fileSize>10*1024*1024) {await sendMessage(chatId,'Toʻlov chekini PNG, JPG yoki PDF qilib yuboring. Hajmi 10 MB dan oshmasin.');return;}
+    const existing=db.payments.find(row=>row.telegram_id===chatId && row.name===profile.name && row.phone===profile.phone && row.offer_version===profile.offerVersion && row.receipt?.uniqueId===receipt.uniqueId);
+    if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?undefined:retryKeyboard());return;}
+    const parts=nowParts();
+    const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
+    db.payments.push(row);profile.step='done';saveDb(db);
+    runInBackground('payment',()=>deliverPayment(db,row));
+    await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.\n\n'+contactText(),keyboard([['📋 Holat']]));return;
+  }
+}
+function recoverInterrupted(db) {
+  for(const row of [...db.registrations,...db.payments])if(['sending','pending'].includes(row.status))row.status='failed';
+  return db;
+}
+
+function createPollingRuntime({ shutdownTimeoutMs = 240000, onShutdownTimeout = () => process.exit(1) } = {}) {
+  let stopping = false;
+  let shutdownTimer;
+  let db;
+  function dispose() {
+    clearTimeout(shutdownTimer);
+  }
+  function requestStop() {
+    if (stopping) return;
+    stopping = true;
+    console.info('Neo Sisra shutdown requested; finishing current updates and deliveries.');
+    shutdownTimer = setTimeout(() => {
+      try { if (db) saveDb(db); } catch (error) { console.error(safeError(error)); }
+      console.error('Neo Sisra shutdown deadline reached; unfinished deliveries require explicit retry.');
+      onShutdownTimeout();
+    }, shutdownTimeoutMs);
+  }
+  async function run() {
+    if (stopping) { dispose(); return; }
+    db = recoverInterrupted(loadDb());
+    saveDb(db);
+    let offset = Number(db.last_update_id || 0) + 1;
+    let connected = false;
+    try {
+      while (!stopping) {
+        try {
+          const url = `${API}/getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'callback_query']))}`;
+          const payload = await fetchJson(url, { method: 'GET' }, POLL_FETCH_TIMEOUT_MS, 'Telegram getUpdates');
+          if (!payload.ok) throw new Error('Telegram polling bajarilmadi (kod '+Number(payload.error_code||0)+').');
+          if (!connected) { console.info('Neo Sisra polling ready.'); connected = true; }
+          for (const update of payload.result) {
+            if (update.message) {
+              try {
+                await handleMessage(update.message, db);
+              } catch (err) {
+                console.error(safeError(err));
+                await sendMessage(update.message.chat.id, 'Xatolik yuz berdi. /status orqali holatni tekshiring yoki qayta urinib koʻring.');
+              }
+            } else if (update.callback_query) {
+              try {
+                await handleCallback(update.callback_query, db);
+              } catch (err) {
+                console.error(`Callback xatoligi: ${safeError(err)}`);
+                try {
+                  await answerCb(update.callback_query.id, 'Xatolik');
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            // A shutdown finishes the returned batch. Persist the offset only after
+            // handling each update, so an interrupted handler is not acknowledged.
+            offset = update.update_id + 1;
+            db.last_update_id = update.update_id;
+            saveDb(db);
+          }
+        } catch (err) {
+          console.error(`Polling xatoligi: ${safeError(err)}`);
+          if (!stopping) await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+      }
+      while (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
+      saveDb(db);
+      console.info('Neo Sisra shutdown complete.');
+    } finally {
+      dispose();
+    }
+  }
+  return { run, requestStop, dispose };
+}
+
+if (require.main === module) {
+  if (!BOT_TOKEN) {
+    console.error('BOT_TOKEN .env faylida yoq');
+    process.exit(1);
+  }
+
+  if (!GOOGLE_SCRIPT_URL) { console.error('GOOGLE_SCRIPT_URL sozlanishi kerak.'); process.exit(1); }
+  const runtime = createPollingRuntime();
+  process.on('SIGTERM', runtime.requestStop);
+  process.on('SIGINT', runtime.requestStop);
+  (async () => {
+    try {
+      const identity = await tg('getMe');
+      if (identity.username !== 'neo_sisrabot') throw new Error('Sozlangan token Neo Sisra botiga tegishli emas.');
+      console.info('Neo Sisra bot identity verified: @'+identity.username);
+      await runtime.run();
+    } finally {
+      runtime.dispose();
+      process.removeListener('SIGTERM', runtime.requestStop);
+      process.removeListener('SIGINT', runtime.requestStop);
+    }
+  })().catch(error => { console.error(safeError(error)); process.exitCode=1; });
+}
+
+module.exports = {
+  emptyDb,
+  exportExcel,
+  normalizePhone,
+  paymentText,
+  handleMessage,
+  handleCallback,
+  recoverInterrupted,
+  createPollingRuntime,
+  leadReport,
+  waitForBackground: () => Promise.all([...pendingTasks]),
+};

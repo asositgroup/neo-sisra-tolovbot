@@ -1,0 +1,10 @@
+.env*
+!.env.example
+data/
+node_modules/
+tools/
+release.tar.gz
+*.key
+*.pem
+__pycache__/
+*.pyc

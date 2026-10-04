@@ -1,0 +1,25 @@
+[Unit]
+Description=Neo Sisra Telegram payment bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=neo-sisra-bot
+Group=neo-sisra-bot
+WorkingDirectory=/opt/neo-sisra-pay-bot/current
+ExecStart=/usr/bin/node /opt/neo-sisra-pay-bot/current/bot.js
+Environment=TZ=Asia/Tashkent
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=260
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/neo-sisra-pay-bot/data
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
