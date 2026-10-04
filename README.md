@@ -76,6 +76,8 @@ Mahalliy tekshiruv: `npm run check`, `npm test`. Deploy testlari Linuxdagi Pytho
 
 ### Tekshirilgan joylashtirish — 2026-10-05
 
+Server timeri GitHub’dan `3502546b3e8e427d263558694bd20b9992fa1964` commitini avtomatik oldi, 96 ta testni oʻtkazdi va shu versiyani joylashtirdi. Poll xizmati muvaffaqiyatli tugadi, timer keyingi tekshiruvni kutmoqda; bot `active/running` va yangi ishga tushishdagi `Neo Sisra polling ready.` yozuvi tasdiqlandi.
+
 `@neo_sisrabot` `/opt/neo-sisra-pay-bot` da alohida `neo-sisra-pay-bot.service` orqali ishga tushirildi. Tekshiruvda xizmat `active/running`, qayta ishga tushishlar soni `0`; Telegram `getMe` aynan shu botni tasdiqladi va birinchi polling javobi muvaffaqiyatli keldi. Uchta JS modulning server SHA-256 qiymatlari mahalliy fayllar bilan bir xil. Avvalgi bot kodi oʻzgarmagan va uning xizmati ham faol.
 
 34 ta JavaScript testi va 62 ta Linux testi (41 deploy, 21 avtomatik tekshiruv) serverdagi alohida test muhitida oʻtdi. Botning Google yuborish moduli orqali alohida belgilangan `TEST Neo Sisra bot SSH 2026-10-05` yozuvi yuborildi: mavjud roʻyxatdan oʻtish varagʻida 6-qator va cheklar varagʻida 4-qator tekshirildi. Rozilik mavjud `Oferta`/`Offerta` ustunlariga tushdi. Sinov PNG fayli Drive’da bor (14803 bayt). Bu haqiqiy toʻlov emas. Telegram foydalanuvchisi bilan toʻliq jonli suhbat hali sinovdan oʻtkazilmagan.
