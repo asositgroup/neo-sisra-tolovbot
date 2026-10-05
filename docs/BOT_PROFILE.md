@@ -41,6 +41,21 @@ Operator PDFni release tashqarisidagi `assets/` papkasiga alohida ko‘chiradi v
 
 Rasm izohiga matn sig‘masa yoki fayl mavjud bo‘lmasa, to‘liq matn va tugmalar yuboriladi. Rasm release tashqarisida saqlanadi; CI/CD uni o‘chirmaydi. `.env` o‘zgargach bot qayta ishga tushiriladi. `WELCOME_IMAGE_PATH` alohida sozlama; to‘lov rasmini qo‘shish `/start` xabarini o‘zgartirmaydi.
 
+## Oferta hujjati
+
+Tasdiqlangan [oferta Word hujjati](../assets/neo-sisra-oferta-2026-10-05.docx) foydalanuvchi bergan fayldan olingan. Undagi bot nomi ikki joyda `@neo_sisrabot`ga tuzatilgan; qolgan matn va hujjat tuzilishi saqlangan.
+
+Lokal ishga tushirish uchun `.env.example`dagi `OFFER_DOC_PATH` yetarli. Productionda hujjatni alohida yuklab, quyidagilarni sozlang:
+
+```dotenv
+OFFER_DOC_PATH=/opt/neo-sisra-pay-bot/assets/neo-sisra-oferta-2026-10-05.docx
+OFFER_VERSION=2026-10-05-ac2a98121e23
+```
+
+Fayl SHA-256: `ac2a98121e23cb2ce25c61052c8abef629cf21f168230361dddca165cbf915d8`. Bot foydalanuvchisi hujjatni o‘qiy olishi kerak. CI/CD runtime arxivi `assets/` fayllarini o‘zi o‘rnatmaydi. Avval hujjatni yuklang va tekshiring, so‘ng `.env`dagi yo‘l/versiyani yangilang va botni qayta ishga tushiring yoki yangi release chiqaring.
+
+“Oferta shartlarini oʻqish” hujjatni Telegram orqali yuboradi; o‘qish rozilikni avtomatik belgilamaydi. “Roziman” bosilgandagina yangi versiyaga rozilik saqlanadi va mavjud Google Sheets `Oferta`/`Offerta` ustuniga `Roziman` yuboriladi. Avvalgi versiyaga rozi bo‘lgan foydalanuvchi `/payment` orqali yangi shartlarni tasdiqlaydi; tarixiy yozuvlar o‘zgartirilmaydi. Qabul qilingandan keyin ham avvalgi “Oferta shartlarini oʻqish” tugmasi bilan hujjatni qayta olish mumkin.
+
 ## Karta rekvizitlari
 
 To‘lov oynasi HUMO, UZCARD va Visa kartalarini shu tartibda ko‘rsatadi. Server `.env` faylida raqam va karta egasi alohida sozlanadi; raqamni o‘qish qulay bo‘lishi uchun to‘rttadan guruhlab yozing:

@@ -22,6 +22,8 @@ function fixture(t, settings = {}, hook) {
   fs.writeFileSync(imagePath, imageBytes);
   const pdfPath = path.join(dataDir, 'paynet-qr.pdf');
   fs.writeFileSync(pdfPath, pdfBytes);
+  const offerPath = path.join(dataDir, 'neo-sisra-oferta.pdf');
+  fs.writeFileSync(offerPath, pdfBytes);
   const config = {
     BOT_TOKEN: token, GOOGLE_SCRIPT_URL: endpoint, PRIMARY_ADMIN_IDS: '42', EXTRA_ADMIN_IDS: '',
     NOTIFY_CHAT_ID: '', OFFER_VERSION: 'offline-payment-v1', OFFER_DOC_PATH: '', WELCOME_IMAGE_PATH: '',
@@ -31,6 +33,7 @@ function fixture(t, settings = {}, hook) {
   };
   if (config.PAYMENT_IMAGE_PATH === true) config.PAYMENT_IMAGE_PATH = imagePath;
   if (config.PAYNET_QR_PATH === true) config.PAYNET_QR_PATH = pdfPath;
+  if (config.OFFER_DOC_PATH === true) config.OFFER_DOC_PATH = offerPath;
   const previousEnv = Object.fromEntries(Object.keys(config).map(key => [key, process.env[key]]));
   Object.assign(process.env, config);
   const requests = [], originalFetch = globalThis.fetch;
@@ -177,6 +180,106 @@ test('payment command and repeated menu/status callbacks reuse registration with
   assert.equal(JSON.stringify(f.db), before);
   assert.equal(f.replies().filter(reply => reply.body.text === f.bot.paymentText()).length, 6);
   assert.equal(f.replies().filter(reply => reply.body.text === 'Hali chek yubormagansiz.').length, 3);
+});
+
+test('oferta PDF can be read before and after consent without changing state or writing to Google', async t => {
+  const f = fixture(t, { OFFER_DOC_PATH: true, OFFER_VERSION: 'approved-offer-v2' });
+  await f.fill();
+  const initial = { ...f.db.users['101'] };
+  for (const profile of [
+    initial,
+    { ...initial, step: 'receipt', offerAccepted: true, offerVersion: 'approved-offer-v2' },
+    { ...initial, step: 'done', offerAccepted: true, offerVersion: 'pending-offer-v1' },
+  ]) {
+    f.db.users['101'] = profile;
+    const before = JSON.stringify(f.db);
+    f.requests.length = 0;
+    await f.bot.handleCallback(callback(101, 'offer:read'), f.db);
+    assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery', 'sendDocument']);
+    const reply = f.requests[1];
+    assert.equal(reply.body.chat_id, '101');
+    assert.equal(reply.body.caption, 'Neo Sisra — ommaviy oferta');
+    assert.equal(reply.body.document.name, 'neo-sisra-oferta.pdf');
+    assert.equal(reply.body.document.type, 'application/pdf');
+    assert.deepEqual(Buffer.from(await reply.body.document.arrayBuffer()), pdfBytes);
+    assert.equal(JSON.stringify(f.db), before, 'Reading must not accept or migrate consent');
+    assert.equal(f.googleRequests().length, 0);
+  }
+});
+
+test('oferta callbacks require the completed profile owner in a private chat and acceptance requires the offer stage', async t => {
+  const f = fixture(t, { OFFER_DOC_PATH: true });
+  await f.fill();
+  const valid = { ...f.db.users['101'] };
+  for (const action of ['read', 'yes', 'no']) {
+    for (const scenario of [
+      { event: callback(101, 'offer:' + action, { from: { id: 42 } }) },
+      { event: callback(101, 'offer:' + action, { message: { chat: { id: 101, type: 'group' } } }) },
+      { event: callback(999, 'offer:' + action) },
+      { event: callback(101, 'offer:' + action), profile: { ...valid, step: 'name' } },
+      { event: callback(101, 'offer:' + action), profile: { ...valid, step: 'phone' } },
+      ...(action === 'read' ? [] : ['receipt', 'done'].map(step => ({
+        event: callback(101, 'offer:' + action), profile: { ...valid, step, offerAccepted: true, offerVersion: 'older-version' },
+      }))),
+    ]) {
+      f.db.users['101'] = scenario.profile || valid;
+      const before = JSON.stringify(f.db);
+      f.requests.length = 0;
+      await f.bot.handleCallback(scenario.event, f.db);
+      assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery']);
+      assert.equal(JSON.stringify(f.db), before);
+      assert.equal(f.googleRequests().length, 0);
+    }
+  }
+});
+
+for (const step of ['receipt', 'done']) {
+  test('payment reopens updated oferta for an existing ' + step + ' profile and records explicit consent only once', async t => {
+    const f = fixture(t, { OFFER_DOC_PATH: true, OFFER_VERSION: 'approved-offer-v2' });
+    await f.fill(); await f.consent();
+    Object.assign(f.db.users['101'], { step, offerVersion: 'pending-offer-v1' });
+    f.db.registrations[0].offer_version = 'pending-offer-v1';
+    f.bot.saveDb(f.db);
+    const oldRegistration = JSON.stringify(f.db.registrations[0]);
+    f.requests.length = 0;
+    await f.bot.handleMessage(message(101, '/payment'), f.db);
+    assert.equal(f.db.users['101'].step, 'offer');
+    assert.equal(f.db.users['101'].name, 'Offline Person');
+    assert.equal(f.db.users['101'].phone, '+998901234567');
+    assert.equal(f.db.users['101'].offerVersion, 'pending-offer-v1', 'Opening the offer must not replace old consent');
+    assert.deepEqual(buttons(f.replies().at(-1)).map(button => button.callback_data), ['offer:read', 'offer:yes', 'offer:no']);
+    assert.equal(f.googleRequests().length, 0);
+    await f.bot.handleCallback(callback(101, 'offer:no'), f.db);
+    assert.equal(f.db.users['101'].step, 'offer');
+    assert.equal(f.db.registrations.length, 1);
+    assert.equal(f.googleRequests().length, 0);
+    await f.consent();
+    assert.equal(f.db.users['101'].step, 'receipt');
+    assert.equal(f.db.users['101'].offerVersion, 'approved-offer-v2');
+    assert.equal(f.db.registrations.length, 2);
+    assert.equal(f.db.registrations[1].offer_version, 'approved-offer-v2');
+    assert.equal(f.googleRequests().length, 1);
+    assert.equal(f.googleRequests()[0].body.Oferta, 'Roziman');
+    assert.equal(JSON.stringify(f.db.registrations[0]), oldRegistration);
+    await f.consent();
+    assert.equal(f.db.registrations.length, 2);
+    assert.equal(f.googleRequests().length, 1, 'Repeated old accept buttons cannot create duplicate registrations');
+  });
+}
+
+test('payment does not bypass incomplete identity data when renewing an old oferta', async t => {
+  const f = fixture(t);
+  await f.fill();
+  const initial = { ...f.db.users['101'], step: 'receipt', offerAccepted: true, offerVersion: 'older-version' };
+  for (const patch of [{ name: '' }, { name: '  ' }, { phone: '' }, { phone: 'not a phone' }]) {
+    f.db.users['101'] = { ...initial, ...patch };
+    const before = JSON.stringify(f.db);
+    f.requests.length = 0;
+    await f.bot.handleMessage(message(101, '/payment'), f.db);
+    assert.match(f.replies()[0].body.text, /roʻyxatdan oʻtishni yakunlang/);
+    assert.equal(JSON.stringify(f.db), before);
+    assert.equal(f.googleRequests().length, 0);
+  }
 });
 
 for (const [name, config] of Object.entries({

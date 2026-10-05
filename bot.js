@@ -805,12 +805,13 @@ async function handleAdmin(message, db) {
 async function handleOfferCallback(cb,db) {
   const chatId=cb.message?.chat?.id;
   const profile=db.users[userKey(chatId)];
-  if(cb.message?.chat?.type!=='private' || cb.from?.id!==chatId || !profile || profile.step!=='offer') {await answerCb(cb.id,'Avval maʼlumotlaringizni kiriting.');return;}
+  if(cb.message?.chat?.type!=='private' || cb.from?.id!==chatId || !profile || !['offer','receipt','done'].includes(profile.step)) {await answerCb(cb.id,'Avval maʼlumotlaringizni kiriting.');return;}
   if(cb.data==='offer:read') {
     await answerCb(cb.id);
     if(OFFER_DOC_PATH && fs.existsSync(OFFER_DOC_PATH)) await sendDocument(chatId,OFFER_DOC_PATH,'Neo Sisra — ommaviy oferta');
     return;
   }
+  if(profile.step!=='offer') {await answerCb(cb.id,'Avval maʼlumotlaringizni kiriting.');return;}
   if(cb.data!=='offer:yes') {
     await answerCb(cb.id,'Davom etish uchun rozilik kerak.');
     await askOffer(chatId);return;
@@ -1016,6 +1017,9 @@ async function handleMessage(message,db) {
   if(text==='/payment' || text==='💳 Toʻlov') {
     if (hasCurrentConsent(profile)) await sendPayment(chatId);
     else if (profile.step==='offer') await askOffer(chatId);
+    else if (['receipt','done'].includes(profile.step) && typeof profile.name==='string' && profile.name.trim() && normalizePhone(profile.phone)) {
+      profile.step='offer';saveDb(db);await askOffer(chatId);
+    }
     else await sendMessage(chatId,'Toʻlov maʼlumotlarini ochish uchun roʻyxatdan oʻtishni yakunlang va oferta shartlariga rozilik bering.');
     return;
   }
