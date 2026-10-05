@@ -104,7 +104,6 @@ const PAYMENT_PROVIDERS = [
   { id: 'paynet', name: 'Paynet', url: paymentUrl(process.env.PAYNET_URL, 'paynet.uz') },
 ];
 const MANAGER_URL = managerUrl(CONTACT_ADMIN);
-const CHANNEL_URL = 'https://t.me/+q9W8PHE9qzpiZDQ1';
 const SERVICE_PRICE = process.env.SERVICE_PRICE || 'XXX';
 const REGULAR_SERVICE_PRICE = process.env.REGULAR_SERVICE_PRICE || 'XXX';
 const PAYMENT_CARDS = [
@@ -122,9 +121,6 @@ function safeError(error) {
 }
 function profileFor(row) {
   return {name:row.name, phone:row.phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
-}
-function contactText() {
-  return ['☎️ Telefon: '+escHtml(CONTACT_PHONE), MANAGER_URL ? '<a href="'+MANAGER_URL+'">Menejer bilan bogʻlanish</a>' : '', '<a href="'+CHANNEL_URL+'">Neo Sisra Telegram kanali</a>'].filter(Boolean).join('\n');
 }
 function retryKeyboard() {
   return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
@@ -538,7 +534,7 @@ async function deliverPayment(db,row) {
 }
 function paymentText() {
   const cards=PAYMENT_CARDS.map(c=>'<b>'+escHtml(c.bank)+'</b>\n<code>'+escHtml(c.number)+'</code>\nKarta egasi: '+escHtml(c.holder)).join('\n\n');
-  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Oddiy narx: <b>'+escHtml(REGULAR_SERVICE_PRICE)+'</b>','Vebinar narxi — toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.','',contactText()].join('\n');
+  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Oddiy narx: <b>'+escHtml(REGULAR_SERVICE_PRICE)+'</b>','Vebinar narxi — toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.'].join('\n');
 }
 
 function xmlCell(value) {
@@ -1056,7 +1052,7 @@ async function handleMessage(message,db) {
     const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
     db.payments.push(row);profile.step='done';saveDb(db);
     pumpDeliveries(db);
-    await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.\n\n'+contactText(),paymentKeyboard(true));return;
+    await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.',paymentKeyboard(true));return;
   }
 }
 function recoverInterrupted(db) {
