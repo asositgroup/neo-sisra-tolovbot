@@ -46,12 +46,12 @@ function setting(name, fallback, maximum) {
   if (!Number.isInteger(value) || value < 1 || value > maximum) throw new Error(name+' notoʻgʻri sozlangan.');
   return value;
 }
-const updateWorkers = options.updateWorkers || setting('UPDATE_WORKERS', 32, 64);
+const updateWorkers = options.updateWorkers || setting('UPDATE_WORKERS', 100, 100);
 const deliveryWorkers = options.deliveryWorkers || setting('DELIVERY_WORKERS', 4, 10);
 const deliveryQueue = createWorkQueue({ concurrency: deliveryWorkers, maxPending: deliveryWorkers });
 const telegramQueue = options.telegramQueue || createTelegramQueue({
-  ratePerSecond: setting('TELEGRAM_MESSAGES_PER_SECOND', 25, 30),
-  perChatMs: 1050, groupMs: 3100, concurrency: 8, maxPending: 500,
+  ratePerSecond: setting('TELEGRAM_MESSAGES_PER_SECOND', 28, 30),
+  perChatMs: 1050, groupMs: 3100, concurrency: 16, maxPending: 500,
 });
 const google = options.google || createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
 let store = options.stateStore;

@@ -6,13 +6,13 @@ Bot bir nechta foydalanuvchining xabarini parallel qayta ishlaydi. Bir odamning 
 
 | Qism | Standart qiymat | Izoh |
 | --- | --- | --- |
-| Telegram update ishlovchilari | `UPDATE_WORKERS=32` | 1–64 oralig‘ida; turli chatlar parallel, bir chat ketma-ket. |
+| Telegram update ishlovchilari | `UPDATE_WORKERS=100` | 1–100 oralig‘ida; turli chatlar parallel, bir chat ketma-ket. |
 | Olingan update paketi | 100 tagacha | Keyingi `getUpdates` oldidan olingan paket tugatiladi; xotirada cheksiz paket yig‘ilmaydi. |
 | Google yuborish ishlovchilari | `DELIVERY_WORKERS=4` | 1–10 oralig‘ida; qolgan yozuvlar SQLite’da `pending` holatda turadi. |
-| Telegram xabarlar tezligi | `TELEGRAM_MESSAGES_PER_SECOND=25` | 1–30 oralig‘ida; butun bot uchun umumiy yuborish tezligi. |
+| Telegram xabarlar tezligi | `TELEGRAM_MESSAGES_PER_SECOND=28` | 1–30 oralig‘ida; butun bot uchun umumiy yuborish tezligi. |
 | Bir shaxsiy chatga xabar oralig‘i | 1050 ms | Bitta suhbatdagi xabarlar tartibi saqlanadi. |
 | Bir guruhga xabar oralig‘i | 3100 ms | Guruhdagi topiclar ham bir chat limitini bo‘lishadi. |
-| Telegram tarmoq chaqiruvlari | 8 tagacha faol | Turli chatlar orasida; bir chatga ikkita chaqiruv parallel yuborilmaydi. |
+| Telegram tarmoq chaqiruvlari | 16 tagacha faol | Turli chatlar orasida; bir chatga ikkita chaqiruv parallel yuborilmaydi. |
 | Telegram chiqish navbati | 500 ta jami ish | Faol, kutayotgan va 429’dan keyin qayta urinishlar birga hisoblanadi; to‘lganda yangi ish rad etiladi. |
 | Chek fayli | 10 MiB gacha | PNG, JPG/JPEG yoki PDF; hajm, kengaytma va fayl boshlanishi tekshiriladi. |
 | Ommaviy xabar | Bitta fon ishi | Oddiy foydalanuvchi javoblari boshqa chatlardagi ommaviy xabarlardan ustun. |
@@ -20,12 +20,12 @@ Bot bir nechta foydalanuvchining xabarini parallel qayta ishlaydi. Bir odamning 
 Uchta muhit sozlamasi `.env` orqali boshqariladi:
 
 ```dotenv
-UPDATE_WORKERS=32
+UPDATE_WORKERS=100
 DELIVERY_WORKERS=4
-TELEGRAM_MESSAGES_PER_SECOND=25
+TELEGRAM_MESSAGES_PER_SECOND=28
 ```
 
-O‘zgartirgach botni qayta ishga tushiring. Sonlarni kattalashtirish Telegram yoki Google kvotasini oshirmaydi. Masalan, 25 xabar/soniya sozlamasida 100 ta alohida xabarning yuborilishi ideal sharoitda ham bir necha soniyaga taqsimlanadi. `/start` esa bir nechta chiqish xabarini yaratadi; foydalanuvchi sonini xabar tezligiga tenglashtirib bo‘lmaydi.
+O‘zgartirgach botni qayta ishga tushiring. Sonlarni kattalashtirish Telegram yoki Google kvotasini oshirmaydi. Masalan, 28 xabar/soniya sozlamasida 100 ta alohida xabarning yuborilishi ideal sharoitda ham bir necha soniyaga taqsimlanadi. `/start` salomlashuvni, sozlangan bo‘lsa rasmni, so‘ng ism so‘rashni alohida xabarlar bilan aynan shu tartibda yuboradi. Parallel ishlash turli foydalanuvchilar orasida bo‘ladi. 100 kishiga bittadan salomlashuv 100 ta xabar, salomlashuv va ism so‘rash esa jami 200 ta xabar degani; ishlovchilar sonini oshirish Telegram yuborish limitini oshirmaydi.
 
 Telegram bepul yuborish uchun bir chatda taxminan 1 xabar/soniya, guruhda 20 xabar/daqiqa va ommaviy yuborishda taxminan 30 xabar/soniya chegaralarini tavsiya qiladi. Ushbu bot pullik broadcast rejimini yoqmaydi. [Telegram rasmiy FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
 
@@ -85,14 +85,24 @@ Qayta bajariladigan offline yuklama sinovi:
 node scripts/benchmark.cjs
 ```
 
-2026-10-05 kuni Linux serverda Node 22.23.0 bilan, tarmoqdan ajratilgan alohida foydalanuvchi ostida o‘lchandi. Har Telegram javobi sun’iy 100 ms; haqiqiy 25 xabar/soniya va 1050 ms chat oralig‘i ishlatildi. Har bir foydalanuvchi bir paytda `/start` yuboradi va ikkita javob oladi; har senariy yangi vaqtinchalik baza bilan boshlanadi. Google, haqiqiy Telegram, katta fayllar va uzoq muddatli trafik bu sinovga kirmaydi.
+2026-10-05 kuni Linux serverda Node 22.23.0 bilan, tarmoqdan ajratilgan alohida foydalanuvchi ostida o‘lchandi. Har Telegram javobi sun’iy 100 ms; haqiqiy 28 xabar/soniya va 1050 ms chat oralig‘i, 100 ta update ishlovchisi qo‘llandi. Har bir foydalanuvchi bir paytda `/start` yuboradi va alohida salomlashuv, keyin ism so‘rash xabarini oladi; xabarlar birlashtirilmagan. Har senariy yangi vaqtinchalik baza bilan boshlanadi. Google, haqiqiy Telegram, katta fayllar va uzoq muddatli trafik bu sinovga kirmaydi.
 
-| Birdan kelgan foydalanuvchi | Chiqish xabarlari | Ikkala javob uchun p95 | Oxirgi foydalanuvchiga ikkala javob |
-| --- | --- | --- | --- |
-| 10 | 20 | 1,55 soniya | 1,55 soniya |
-| 50 | 100 | 4,36 soniya | 4,44 soniya |
-| 100 | 200 | 7,77 soniya | 9,02 soniya |
+| Birdan kelgan foydalanuvchi | Chiqish xabarlari | Oxirgi salomlashuv | Ism so‘rash uchun p95 | Oxirgi ism so‘rash |
+| --- | --- | --- | --- | --- |
+| 10 | 20 | 0,46 soniya | 1,51 soniya | 1,51 soniya |
+| 50 | 100 | 1,91 soniya | 3,65 soniya | 3,72 soniya |
+| 100 | 200 | 3,74 soniya | 7,19 soniya | 7,37 soniya |
 
-Bu yangi botning konkret simulyatsiyadagi natijasi. Reklamadagi haqiqiy javob vaqti tashqi xizmatlar va trafik tarkibiga qarab o‘zgaradi. Tekshiruvda 91 ta Node testi va 84 ta Python deploy testi ham serverning offline test muhitida o‘tdi.
+Bu botning konkret simulyatsiyadagi natijasi. Oldingi 32 ishlovchi / 25 xabar-soniya sozlamasida xuddi shu server sinovida 100 kishining oxirgi salomlashuvi 7,97 soniya, ism so‘rashi 9,02 soniya bo‘lgan. Reklamadagi haqiqiy javob vaqti tashqi xizmatlar va trafik tarkibiga qarab o‘zgaradi. 100 kishiga ketma-ket ikki xabar — jami 200 xabar — yuborishni bepul rejimda 2–3 soniyaga kafolatlash mumkin emas; `async/await` Telegram limitini oshirmaydi.
 
 Reklama oqimini oshirishda oddiy javoblarning p95 vaqti, `pending` ishlarning soni/yoshi, Google va Telegram xatolari, RAM va diskni kuzating. Yuborish ishlovchilari yoki Telegram tezligini faqat kuzatilgan ehtiyoj va xizmat limitlari asosida o‘zgartiring. Hozir monitoring uchun tashqi dashboard va avtomatik alert sozlanmagan; xizmat loglari [server qo‘llanmasida](DEPLOYMENT.md#kundalik-boshqaruv) berilgan.
+
+## Qo‘llangan va hali qo‘llanmagan yechimlar
+
+Asinxron tarmoq chaqiruvlari, chat bo‘yicha tartib, umumiy rate limiter, `retry_after` va SQLite’dagi saqlanadigan Google navbati bor. Bot grammY/Telegraf paketlariga bog‘lanmagan; bularning shu vazifalari Node.js modulida yozilgan. 100 ta ishlovchi bitta jarayon ichidagi asinxron ishlar, 100 ta alohida server jarayoni emas.
+
+Webhook yo‘q: bot `getUpdates` bilan long polling ishlatadi. 25 soniyalik timeout yangi update kelmaganda ulanishni kutib turish uchun; har xabarga majburiy 25 soniya kechikish qo‘shmaydi. Hozir keyingi paket avvalgi paket tugagach olinadi, shuning uchun sekin handler keyingi paketdagi odamlarga ta’sir qilishi mumkin. Qabul qilishni ishlovdan ajratish yoki webhook bilan mustahkam kirish navbati bu cheklovni kamaytirishi mumkin. Har ikkala usulda ham parallel ishlash mumkin; webhook chiqishdagi Telegram limitini oshirmaydi. [grammY yuklama qo‘llanmasi](https://grammy.dev/advanced/scaling).
+
+Statik salomlashuv rasmi va hujjatlar uchun `file_id` keshi hali yo‘q: ular yuborilganda fayldan qayta yuklanadi. Chekni admin guruhiga jo‘natish esa mavjud `file_id` dan foydalanadi. Telegram saqlangan faylni `file_id` bilan qayta yuborishni tavsiya qiladi; bu media upload xarajatini kamaytiradi, oddiy matn uchun yuborish limitini o‘zgartirmaydi. [Telegram fayl yuborish](https://core.telegram.org/bots/api#sending-files).
+
+Redis/RabbitMQ, ko‘p jarayonli yoki ko‘p serverli ish hozir yo‘q. Bunday o‘tishda umumiy chat tartibi, delivery claim va bot bo‘yicha umumiy rate limiter ham kerak bo‘ladi. Serverning Telegram’ga eng yaqin hududda ekani tekshirilmagan; Frankfurt/Amsterdam deb taxmin qilinmaydi. Joylashuvni o‘zgartirishdan oldin haqiqiy tarmoq kechikishi o‘lchanadi.

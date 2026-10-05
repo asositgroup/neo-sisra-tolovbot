@@ -23,18 +23,73 @@ globalThis.fetch=async(url,options={})=>{
 };
 const {createBot}=require('../bot.js');
 const {readState}=require('../state-store.cjs');
-let bot, testDirectory;
+let bot, testDirectory, savedWelcomeImagePath;
+function openBot(){return createBot({dataDir:testDirectory,telegramQueue:{run:(_,fn)=>Promise.resolve().then(fn),idle:()=>Promise.resolve()}});}
 beforeEach(()=>{
+  savedWelcomeImagePath=process.env.WELCOME_IMAGE_PATH;
+  process.env.WELCOME_IMAGE_PATH='';
   testDirectory=fs.mkdtempSync(path.join(directory,'case-'));
-  bot=createBot({dataDir:testDirectory,telegramQueue:{run:(_,fn)=>Promise.resolve().then(fn),idle:()=>Promise.resolve()}});
+  bot=openBot();
 });
-afterEach(async()=>{await bot.waitForBackground();bot.closeStore();});
+afterEach(async()=>{
+  try {await bot.waitForBackground();bot.closeStore();}
+  finally {
+    if(savedWelcomeImagePath===undefined)delete process.env.WELCOME_IMAGE_PATH;
+    else process.env.WELCOME_IMAGE_PATH=savedWelcomeImagePath;
+  }
+});
 after(()=>{globalThis.fetch=originalFetch;fs.rmSync(directory,{recursive:true,force:true});});
 const msg=(id,text,extra={})=>({chat:{id,type:'private'},from:{id,username:'test'},text,message_id:1,...extra});
 const cb=(id,data)=>({id:'cb-'+id,from:{id},message:{chat:{id,type:'private'}},data});
 const sheetRequests=()=>requests.filter(r=>r.url.startsWith('https://script.google.com/'));
 const photo={photo:[{file_id:'TEST_PHOTO',file_unique_id:'TEST_UNIQUE',file_size:6}]};
 async function fill(db,id){await bot.handleMessage(msg(id,'/start'),db);await bot.handleMessage(msg(id,'TEST Neo Sisra'),db);await bot.handleMessage(msg(id,'+998901234567'),db);}
+for(const withImage of [false,true])test(`start preserves separate welcome${withImage?', image':''} and name prompt in order`,{timeout:5000},async()=>{
+  if(withImage){
+    const imagePath=path.join(testDirectory,'welcome.png');
+    fs.writeFileSync(imagePath,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64'));
+    bot.closeStore();process.env.WELCOME_IMAGE_PATH=imagePath;bot=openBot();
+  }
+  let releaseWelcome, welcomeStarted, releaseImage, imageStarted;
+  const welcomeGate=new Promise(resolve=>{releaseWelcome=resolve;});
+  const firstSend=new Promise(resolve=>{welcomeStarted=resolve;});
+  const imageGate=new Promise(resolve=>{releaseImage=resolve;});
+  const imageSend=new Promise(resolve=>{imageStarted=resolve;});
+  responseHook=async request=>{
+    if(request.body?.text?.includes('<b>Neo Sisra</b>')){welcomeStarted();await welcomeGate;}
+    if(request.url.endsWith('/sendPhoto')){imageStarted();await imageGate;}
+    return null;
+  };
+  requests.length=0;const db=bot.loadDb();
+  const starting=bot.handleMessage(msg(111,'/start'),db);
+  try {
+    await firstSend;
+    assert.equal(requests.length,1,'Later steps must wait until the welcome send finishes');
+    assert.match(requests[0].body.text,/50 kishi uchun maxsus taklif/);
+    assert.doesNotMatch(requests[0].body.text,/ismingizni kiriting/);
+    assert.equal(readState({dataDir:testDirectory}).users['111'].step,'name');
+    releaseWelcome();
+    if(withImage){
+      await imageSend;
+      assert.equal(requests.length,2,'The name prompt must wait until the optional image finishes');
+      assert.equal(requests[1].body.caption,undefined);
+      releaseImage();
+    }
+    await starting;
+    assert.deepEqual(requests.map(request=>request.url.slice(request.url.lastIndexOf('/')+1)),withImage?['sendMessage','sendPhoto','sendMessage']:['sendMessage','sendMessage']);
+    const prompt=requests.at(-1).body;
+    assert.match(prompt.text,/ismingizni kiriting/);
+    assert.doesNotMatch(prompt.text,/Neo Sisra/);
+    assert.deepEqual(prompt.reply_markup,{remove_keyboard:true});
+    await bot.handleMessage(msg(111,'Offline Person'),db);
+    assert.equal(db.users['111'].step,'phone');
+    assert.match(requests.at(-1).body.text,/Telefon raqamingizni yuboring/);
+  } finally {
+    releaseWelcome();releaseImage();
+    try {await starting;} finally {responseHook=null;}
+  }
+});
+
 test('consent is mandatory, one-service copy is used, and accepting twice cannot duplicate registration',async()=>{
   requests.length=0;const db=bot.loadDb();await fill(db,101);
   assert.equal(db.users['101'].step,'offer');assert.equal(sheetRequests().length,0);

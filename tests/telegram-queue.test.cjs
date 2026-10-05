@@ -31,8 +31,8 @@ function clockQueue(options = {}) {
   };
 }
 
-test('global default pacing starts at most 25 messages per second without artificial bursts', async () => {
-  const h = clockQueue(), starts = [];
+test('configured 25-per-second pacing starts without artificial bursts', async () => {
+  const h = clockQueue({ ratePerSecond: 25 }), starts = [];
   const jobs = Array.from({ length: 26 }, (_, chatId) => h.queue.run({ chatId }, () => starts.push(h.now())));
   await h.advance(999);
   assert.equal(starts.length, 25);
@@ -42,12 +42,31 @@ test('global default pacing starts at most 25 messages per second without artifi
   assert.equal(h.timers.size, 0);
 });
 
+test('default pacing serves 100 chats with at most 28 starts in every rolling second', async () => {
+  const h = clockQueue(), starts = [];
+  const jobs = Array.from({ length: 100 }, (_, chatId) => h.queue.run({ chatId }, () => starts.push(h.now())));
+  await h.advance(999);
+  assert.equal(starts.length, 28);
+  await h.advance(9);
+  assert.equal(starts.length, 29);
+  assert.equal(starts[28], 1008);
+  await h.advance(3000);
+  await Promise.all(jobs); await h.queue.idle();
+  assert.equal(starts.length, 100);
+  for (let index = 1; index < starts.length; index++) {
+    assert.ok(starts[index] - starts[index - 1] >= 1000 / 28, 'Sends must remain evenly paced');
+    if (index >= 28) assert.ok(starts[index] - starts[index - 28] >= 1000, 'No rolling second may exceed 28 starts');
+  }
+  assert.ok(starts.at(-1) < 3700, 'An idle queue should finish this burst without avoidable delays');
+  assert.equal(h.timers.size, 0);
+});
+
 test('same chat has 1050ms pacing and groups 3100ms while unrelated chats proceed', async () => {
   const h = clockQueue(), seen = [];
   const jobs = [1, 1, -100, -100, 2].map(chatId => h.queue.run({ chatId }, () => seen.push([chatId, h.now()])));
   await h.advance(3200);
   await Promise.all(jobs);
-  assert.deepEqual(seen, [[1, 0], [-100, 40], [2, 80], [1, 1050], [-100, 3140]]);
+  assert.deepEqual(seen, [[1, 0], [-100, 36], [2, 72], [1, 1050], [-100, 3136]]);
   assert.equal(h.timers.size, 0);
 });
 
@@ -73,7 +92,7 @@ test('confirmed 429 globally pauses new starts and its retry keeps chat ordering
   assert.deepEqual(seen, [['first', 0]]);
   await h.advance(1051);
   await Promise.all([first, later, other]);
-  assert.deepEqual(seen, [['first', 0], ['first', 2000], ['other', 2040], ['later', 3050]]);
+  assert.deepEqual(seen, [['first', 0], ['first', 2000], ['other', 2036], ['later', 3050]]);
 });
 
 test('429 without positive retry_after and ambiguous network or 5xx failures are never retried', async () => {

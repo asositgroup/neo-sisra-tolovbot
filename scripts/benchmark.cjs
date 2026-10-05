@@ -15,8 +15,8 @@ Object.assign(process.env, {
   BOT_TOKEN: '123456:OFFLINE_CAPACITY_TEST',
   GOOGLE_SCRIPT_URL: 'https://script.google.com/macros/s/OFFLINE_TEST_ONLY/exec',
   PRIMARY_ADMIN_IDS: '', EXTRA_ADMIN_IDS: '', ADMIN_IDS: '', NOTIFY_CHAT_ID: '',
-  WELCOME_IMAGE_PATH: '', OFFER_DOC_PATH: '', UPDATE_WORKERS: '32',
-  DELIVERY_WORKERS: '4', TELEGRAM_MESSAGES_PER_SECOND: '25',
+  WELCOME_IMAGE_PATH: '', OFFER_DOC_PATH: '', UPDATE_WORKERS: '100',
+  DELIVERY_WORKERS: '4', TELEGRAM_MESSAGES_PER_SECOND: '28',
 });
 let runtime, burst, started, inflight, peak, calls, first, last;
 const originalFetch = globalThis.fetch;
@@ -52,12 +52,12 @@ async function main() {
     const seconds=value=>Number((value/1000).toFixed(2));
     results.push({users:count,messages:calls,maxParallelSends:peak,
       lastFirstReplySeconds:seconds(Math.max(...first.values())),
-      p95BothMessagesSeconds:seconds(finalTimes[Math.ceil(count*0.95)-1]),
-      lastBothMessagesSeconds:seconds(finalTimes.at(-1))});
+      p95NamePromptSeconds:seconds(finalTimes[Math.ceil(count*0.95)-1]),
+      lastNamePromptSeconds:seconds(finalTimes.at(-1))});
   }
   console.log(JSON.stringify({kind:'Offline simulation, not measured production capacity',
-    node:process.version,simulatedTelegramLatencyMs:100,telegramMessagesPerSecond:25,
-    perChatPacingMs:1050,updateWorkers:32,scenario:'simultaneous /start; two replies per user',results},null,2));
+    node:process.version,simulatedTelegramLatencyMs:100,telegramMessagesPerSecond:28,
+    perChatPacingMs:1050,updateWorkers:100,scenario:'simultaneous /start; separate welcome then name prompt per user',results},null,2));
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>{
   globalThis.fetch=originalFetch;

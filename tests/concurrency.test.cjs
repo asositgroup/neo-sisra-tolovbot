@@ -69,6 +69,51 @@ function fakeTelegram({ batch = [], onPoll, onSend } = {}) {
   return { requests, polls: () => polls };
 }
 
+test('default polling admits all 100 independent starts before any handler finishes', { timeout: 5000 }, async t => {
+  const f = fixture(t), gate = deferred(), entered = new Set();
+  const configuredWorkers = process.env.UPDATE_WORKERS;
+  let bot;
+  try {
+    delete process.env.UPDATE_WORKERS;
+    bot = f.open();
+  } finally {
+    if (configuredWorkers === undefined) delete process.env.UPDATE_WORKERS;
+    else process.env.UPDATE_WORKERS = configuredWorkers;
+  }
+  const runtime = bot.createPollingRuntime({ onUpdate: async (event, db) => {
+    entered.add(event.update_id);
+    await gate.promise;
+    await bot.handleMessage(event.message, db);
+  } });
+  const wire = fakeTelegram({
+    batch: Array.from({ length: 100 }, (_, index) => update(index + 1, 10000 + index, '/start')),
+    onPoll: () => runtime.requestStop(),
+  });
+  const running = runtime.run();
+  try {
+    await until(() => entered.size === 100);
+    assert.equal(wire.requests.length, 0, 'All handlers must enter while their replies remain held');
+    assert.equal(readState({ dataDir: f.dataDir }).last_update_id, 0);
+  } finally {
+    gate.resolve();
+    await running;
+  }
+  assert.equal(wire.requests.length, 200);
+  for (let chatId = 10000; chatId < 10100; chatId++) {
+    const replies = wire.requests.filter(request => request.body.chat_id === chatId);
+    assert.equal(replies.length, 2);
+    assert.ok(replies.every(request => request.method === 'sendMessage'));
+    assert.match(replies[0].body.text, /Neo Sisra/);
+    assert.doesNotMatch(replies[0].body.text, /ismingizni kiriting/);
+    assert.match(replies[1].body.text, /ismingizni kiriting/);
+  }
+  const saved = readState({ dataDir: f.dataDir });
+  assert.equal(saved.last_update_id, 100);
+  assert.deepEqual(saved.completed_update_ids, []);
+  assert.equal(Object.keys(saved.users).length, 100);
+  assert.ok(Object.values(saved.users).every(profile => profile.step === 'name'));
+});
+
 test('polling processes independent chats concurrently and keeps each chat FIFO', { timeout: 5000 }, async t => {
   const f = fixture(t), bot = f.open(), gate = deferred(), seen = [];
   const runtime = bot.createPollingRuntime({ onUpdate: async event => {
@@ -174,6 +219,7 @@ test('a blocked broadcast network request does not hold an independent user conv
   const running = runtime.run();
   try {
     await until(() => copyStarted && wire.requests.filter(request => request.body.chat_id === 77 && request.method === 'sendMessage').length === 2);
+    assert.ok(wire.requests.some(request => request.body.chat_id === 77 && request.body.text?.includes('ismingizni kiriting')));
     assert.equal(readState({ dataDir: f.dataDir }).users['77'].step, 'name');
     assert.equal(readState({ dataDir: f.dataDir }).broadcast_job.in_flight, true);
   } finally { gate.resolve(); }

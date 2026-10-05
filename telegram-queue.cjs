@@ -3,8 +3,8 @@
 const { QueueFullError } = require('./work-queue.cjs');
 
 function createTelegramQueue({
-  ratePerSecond = 25, perChatMs = 1050, groupMs = 3100,
-  concurrency = 8, maxPending = 500, maxRetries = 3,
+  ratePerSecond = 28, perChatMs = 1050, groupMs = 3100,
+  concurrency = 16, maxPending = 500, maxRetries = 3,
   now = Date.now, setTimeout: startTimer = setTimeout, clearTimeout: stopTimer = clearTimeout,
 } = {}) {
   for (const value of [ratePerSecond, perChatMs, groupMs]) {
