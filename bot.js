@@ -105,7 +105,9 @@ const PAYMENT_PROVIDERS = [
 const MANAGER_URL = managerUrl(CONTACT_ADMIN);
 const CHANNEL_URL = 'https://t.me/+q9W8PHE9qzpiZDQ1';
 const SERVICE_PRICE = process.env.SERVICE_PRICE || 'XXX';
+const REGULAR_SERVICE_PRICE = process.env.REGULAR_SERVICE_PRICE || 'XXX';
 const PAYMENT_CARDS = [
+  { bank: 'HUMO', number: process.env.HUMO_NUMBER || 'XXXX XXXX XXXX XXXX', holder: process.env.HUMO_HOLDER || 'XXX' },
   { bank: 'UZCARD', number: process.env.UZCARD_NUMBER || 'XXXX XXXX XXXX XXXX', holder: process.env.UZCARD_HOLDER || 'XXX' },
   { bank: 'Visa', number: process.env.VISA_NUMBER || 'XXXX XXXX XXXX XXXX', holder: process.env.VISA_HOLDER || 'XXX' },
 ];
@@ -504,7 +506,7 @@ async function deliverPayment(db,row) {
 }
 function paymentText() {
   const cards=PAYMENT_CARDS.map(c=>'<b>'+escHtml(c.bank)+'</b>\n<code>'+escHtml(c.number)+'</code>\nKarta egasi: '+escHtml(c.holder)).join('\n\n');
-  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.','',contactText()].join('\n');
+  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Oddiy narx: <b>'+escHtml(REGULAR_SERVICE_PRICE)+'</b>','Vebinar narxi — toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.','',contactText()].join('\n');
 }
 
 function xmlCell(value) {

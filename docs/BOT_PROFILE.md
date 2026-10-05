@@ -30,6 +30,30 @@ Havola bo‘sh yoki yaroqsiz bo‘lsa, tugma ko‘rinadi va bosilganda ma’lumo
 
 Rasm izohiga matn sig‘masa yoki fayl mavjud bo‘lmasa, to‘liq matn va tugmalar yuboriladi. Rasm release tashqarisida saqlanadi; CI/CD uni o‘chirmaydi. `.env` o‘zgargach bot qayta ishga tushiriladi. `WELCOME_IMAGE_PATH` alohida sozlama; to‘lov rasmini qo‘shish `/start` xabarini o‘zgartirmaydi.
 
+## Karta rekvizitlari
+
+To‘lov oynasi HUMO, UZCARD va Visa kartalarini shu tartibda ko‘rsatadi. Server `.env` faylida raqam va karta egasi alohida sozlanadi; raqamni o‘qish qulay bo‘lishi uchun to‘rttadan guruhlab yozing:
+
+```dotenv
+HUMO_NUMBER=XXXX XXXX XXXX XXXX
+HUMO_HOLDER=XXX
+UZCARD_NUMBER=XXXX XXXX XXXX XXXX
+UZCARD_HOLDER=XXX
+VISA_NUMBER=XXXX XXXX XXXX XXXX
+VISA_HOLDER=XXX
+```
+
+Bo‘sh qiymatlar `XXX` bilan ko‘rsatiladi. Amal qilish muddati va CVV to‘lovni qabul qilish uchun ko‘rsatilmaydi va ushbu sozlamalarda saqlanmaydi. `.env.example` karta rekvizitlari uchun faqat namuna qiymatlarini saqlaydi; haqiqiy rekvizitlar server `.env` fayliga kiritiladi.
+
+Xizmatning oddiy narxi va vebinar uchun to‘lanadigan summa alohida ko‘rsatiladi. `SERVICE_PRICE` aynan vebinar taklifi bo‘yicha to‘lov miqdori; `REGULAR_SERVICE_PRICE` oddiy narx:
+
+```dotenv
+REGULAR_SERVICE_PRICE=5 000 000 soʻm
+SERVICE_PRICE=4 400 000 soʻm
+```
+
+Qiymat berilmagan bo‘lsa, bot `XXX` ko‘rsatadi. Narxlar xabarda aks etadi; bot chekdagi summani avtomatik tekshirmaydi.
+
 ## Profilni o‘rnatish
 
 Ommaviy matnlar [bot-profile.json](../assets/bot-profile.json) ichida. [JPG rasm](../assets/neo-sisra-bot-v1.jpg) profil va to‘lov oynasiga mos; [PNG manba](../assets/neo-sisra-bot-v1.png) ham saqlangan. Rasm built-in `image_gen` bilan yaratilgan, o‘lchami 1254×1254. [Aniq generatsiya prompti](../assets/imagegen-prompt.txt) saqlangan.
@@ -57,7 +81,7 @@ Profil, rasm va operator skripti odatiy yettita runtime faylli deploy arxiviga k
 
 - Neo Sisraga tegishli Payme, Click va, ishlatilsa, Paynet to‘lov havolalari.
 - Menejer Telegram username’i va aloqa telefoni.
-- Xizmat narxi, karta raqamlari, bank va karta egasi ma’lumotlari; hozir `XXX`.
+- Karta egasi ma’lumotlari; hozir `XXX`. HUMO, UZCARD va Visa raqamlari hamda oddiy/vebinar narxlari foydalanuvchidan olingan, ular server `.env` orqali sozlanadi.
 - Tasdiqlangan oferta hujjati va versiyasi.
 - Yakuniy brend rasmi yoki logotip, agar hozirgi rasm almashtirilsa.
 
