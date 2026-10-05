@@ -6,11 +6,11 @@ Neo Sisra botida profil rasmi, bio, boshlashdan oldingi tavsif hamda rasmli to�
 
 1. `/start`: salomlashuv va ism so‘rash bitta xabarda.
 2. Ism, telefon va majburiy oferta roziligi.
-3. To‘lov rasmi, xizmat va karta ma’lumotlari, Payme / Click / Paynet / menejer tugmalari.
+3. To‘lov rasmi, xizmat va karta ma’lumotlari, sozlangan to‘lov usullari va menejer tugmalari.
 4. PNG, JPG yoki PDF chek; Google Sheets/Drive’ga yetkazish fonda davom etadi.
 5. Chek qabul qilingani va holat/to‘lov tugmalari. `/payment` rozilik bergan foydalanuvchiga to‘lov oynasini qayta ochadi; yangi ro‘yxat yozuvi yaratmaydi.
 
-Tugmalar tashqi to‘lov sahifalariga havoladir. Bot hozir provayderdan avtomatik to‘lov tasdig‘ini olmaydi; chekni qo‘lda tekshirish tartibi saqlangan. Yetkazilgan chek to‘lov tasdiqlandi degani emas.
+Havola sozlangan tugmalar tashqi to‘lov sahifasini ochadi. Paynet PDF sozlangan bo‘lsa, bot QR-kodli hujjatni yuboradi. Bot hozir provayderdan avtomatik to‘lov tasdig‘ini olmaydi; chekni qo‘lda tekshirish tartibi saqlangan. Yetkazilgan chek to‘lov tasdiqlandi degani emas.
 
 ## Havolalar va rasm
 
@@ -21,12 +21,23 @@ PAYMENT_IMAGE_PATH=/opt/neo-sisra-pay-bot/assets/neo-sisra-bot-v1.jpg
 PAYME_URL=
 CLICK_URL=
 PAYNET_URL=
+PAYNET_QR_PATH=/opt/neo-sisra-pay-bot/assets/paynet-qr.pdf
 CONTACT_ADMIN=
 ```
 
 Provayder havolalari mos ravishda `payme.uz`, `click.uz`, `paynet.uz` yoki ularning subdomenidagi HTTPS manzil bo‘lishi kerak. `CONTACT_ADMIN` uchun menejerning `@username` yoki `https://t.me/username` manzili ishlatiladi. Kanalga taklif havolasi menejer kontakti o‘rniga qo‘yilmaydi.
 
-Havola bo‘sh yoki yaroqsiz bo‘lsa, tugma ko‘rinadi va bosilganda ma’lumot hali berilmagani haqida bildirishnoma chiqaradi. Shu holatda interfeys adminlar ko‘rib chiqishi uchun tayyor, provayder orqali real to‘lov hali ulanmagan.
+Havola bo‘sh yoki yaroqsiz bo‘lgan provayder tugmasi yashiriladi. Payme va Click shartnomalari tayyor bo‘lmaguncha ularning sozlamalari bo‘sh qoladi. Menejer tugmasi avvalgidek ko‘rinadi; username yo‘q bo‘lsa, sozlangan telefon yoki aloqa ma’lumoti berilmagani haqida bildirishnoma chiqaradi. Eski xabarlardagi provayder tugmalari ham rost holatni ko‘rsatadi.
+
+### Paynet QR PDF
+
+Foydalanuvchi bergan bir sahifali [asl QR hujjati](../assets/paynet-qr.pdf) o‘zgartirilmaydi. Uning QR ma’lumoti EMV formatida; brauzer havolasi yoki deep-link emas va ichida to‘lov summasi belgilanmagan. Shu hujjat uchun `PAYNET_URL` bo‘sh qoladi. QR ma’lumotidan sun’iy checkout URL yasalmaydi.
+
+`PAYNET_QR_PATH` bot o‘qiy oladigan `.pdf` faylni ko‘rsatishi kerak. Fayl haqiqiy PDF sarlavhasiga ega, oddiy fayl va 50 MiB dan oshmasligi tekshiriladi. Paynet tugmasi bosilganda avval Telegram callback tasdiqlanadi, keyin asl PDF yuboriladi. Izohda sozlangan `SERVICE_PRICE`, QR-kodni qo‘llab-quvvatlaydigan ilovada ochish, summa so‘ralsa uni kiritish, qabul qiluvchi/summani tekshirish va chekni botga yuborish ko‘rsatiladi. Tugma faqat joriy oferta roziligiga ega foydalanuvchining shaxsiy chatida ishlaydi; yangi lead yoki to‘lov yozuvi yaratmaydi, bosqichni o‘zgartirmaydi.
+
+PDF yagona sozlama bo‘lsa, `Paynet orqali toʻlash` tugmasi hujjatni yuboradi. Kelajakda haqiqiy `PAYNET_URL` ham berilsa, asosiy tugma havolani ochadi va yoniga alohida `Paynet QR-kodi` tugmasi qo‘shiladi. PDF yo‘q/o‘qilmasa tugmasi yashiriladi; eski tugma tushunarli xatolik beradi. Yuklashda xatolik bo‘lsa, qayta bosish tavsiya qilinadi.
+
+Operator PDFni release tashqarisidagi `assets/` papkasiga alohida ko‘chiradi va `.env` yo‘lini sozlaydi. Yettita runtime faylli CI/CD arxivi PDFni o‘zi yetkazmaydi. Asset bot foydalanuvchisi uchun o‘qiladigan bo‘lishi kerak; `.env` o‘zgargach faqat Neo Sisra bot xizmati qayta ishga tushiriladi. QR yoki PDF yuborish avtomatik to‘lov tasdig‘i hisoblanmaydi.
 
 Rasm izohiga matn sig‘masa yoki fayl mavjud bo‘lmasa, to‘liq matn va tugmalar yuboriladi. Rasm release tashqarisida saqlanadi; CI/CD uni o‘chirmaydi. `.env` o‘zgargach bot qayta ishga tushiriladi. `WELCOME_IMAGE_PATH` alohida sozlama; to‘lov rasmini qo‘shish `/start` xabarini o‘zgartirmaydi.
 
@@ -79,9 +90,9 @@ Profil, rasm va operator skripti odatiy yettita runtime faylli deploy arxiviga k
 
 ## Yakunlash uchun kerak
 
-- Neo Sisraga tegishli Payme, Click va, ishlatilsa, Paynet to‘lov havolalari.
+- Payme va Click ishlatiladigan bo‘lsa, Neo Sisraga tegishli shartnoma va to‘lov havolalari. Paynet uchun asl QR PDF olingan; checkout havolasi berilmagan.
 - Menejer Telegram username’i va aloqa telefoni.
-- Karta egasi ma’lumotlari; hozir `XXX`. HUMO, UZCARD va Visa raqamlari hamda oddiy/vebinar narxlari foydalanuvchidan olingan, ular server `.env` orqali sozlanadi.
+- HUMO, UZCARD va Visa raqamlari, karta egasi Baxtiyor Jamalov va oddiy/vebinar narxlari foydalanuvchidan tasdiqlangan; ular server `.env` orqali sozlanadi. Bu ma’lumotlar tayyor.
 - Tasdiqlangan oferta hujjati va versiyasi.
 - Yakuniy brend rasmi yoki logotip, agar hozirgi rasm almashtirilsa.
 

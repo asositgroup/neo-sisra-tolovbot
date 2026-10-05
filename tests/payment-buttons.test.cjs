@@ -12,6 +12,7 @@ const { createBot } = require('../bot.js');
 const token = '123456:OFFLINE_PAYMENT_BUTTONS';
 const endpoint = 'https://script.google.com/macros/s/OFFLINE_BUTTONS/exec';
 const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=', 'base64');
+const pdfBytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n');
 const message = (id, text = '', extra = {}) => ({ chat: { id, type: 'private' }, from: { id }, message_id: 1, text, ...extra });
 const callback = (id, data, extra = {}) => ({ id: 'cb-' + id, from: { id }, message: { chat: { id, type: 'private' } }, data, ...extra });
 
@@ -19,14 +20,17 @@ function fixture(t, settings = {}, hook) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-payment-buttons-'));
   const imagePath = path.join(dataDir, 'payment.png');
   fs.writeFileSync(imagePath, imageBytes);
+  const pdfPath = path.join(dataDir, 'paynet-qr.pdf');
+  fs.writeFileSync(pdfPath, pdfBytes);
   const config = {
     BOT_TOKEN: token, GOOGLE_SCRIPT_URL: endpoint, PRIMARY_ADMIN_IDS: '42', EXTRA_ADMIN_IDS: '',
     NOTIFY_CHAT_ID: '', OFFER_VERSION: 'offline-payment-v1', OFFER_DOC_PATH: '', WELCOME_IMAGE_PATH: '',
-    PAYMENT_IMAGE_PATH: '', PAYME_URL: '', CLICK_URL: '', PAYNET_URL: '', CONTACT_ADMIN: '',
+    PAYMENT_IMAGE_PATH: '', PAYME_URL: '', CLICK_URL: '', PAYNET_URL: '', PAYNET_QR_PATH: '', CONTACT_ADMIN: '',
     CONTACT_PHONE: 'XXX', SERVICE_PRICE: 'XXX', UZCARD_NUMBER: 'XXXX XXXX XXXX XXXX',
     UZCARD_HOLDER: 'XXX', VISA_NUMBER: 'XXXX XXXX XXXX XXXX', VISA_HOLDER: 'XXX', ...settings,
   };
   if (config.PAYMENT_IMAGE_PATH === true) config.PAYMENT_IMAGE_PATH = imagePath;
+  if (config.PAYNET_QR_PATH === true) config.PAYNET_QR_PATH = pdfPath;
   const previousEnv = Object.fromEntries(Object.keys(config).map(key => [key, process.env[key]]));
   Object.assign(process.env, config);
   const requests = [], originalFetch = globalThis.fetch;
@@ -54,7 +58,7 @@ function fixture(t, settings = {}, hook) {
     }
   });
   const db = bot.loadDb();
-  return { bot, db, requests,
+  return { bot, db, requests, pdfPath,
     googleRequests: () => requests.filter(request => request.url === endpoint),
     replies: () => requests.filter(request => ['sendPhoto', 'sendMessage'].includes(request.method)),
     async fill(id = 101) {
@@ -100,12 +104,12 @@ test('consent shows one payment photo with complete caption and this business’
   assert.equal(f.db.users['101'].step, 'receipt');
 });
 
-test('missing links keep visible buttons and honest alerts without changing stage or writing to Google', async t => {
+test('missing links are hidden while old callbacks retain honest alerts without state or Google changes', async t => {
   const f = fixture(t);
   await f.fill(); await f.consent();
   const reply = f.replies().at(-1);
   assert.equal(reply.method, 'sendMessage');
-  assert.deepEqual(buttons(reply).map(button => button.callback_data), ['payment:payme', 'payment:click', 'payment:paynet', 'payment:contact']);
+  assert.deepEqual(buttons(reply).map(button => button.callback_data), ['payment:contact']);
   const before = JSON.stringify(f.db);
   f.requests.length = 0;
   for (const provider of ['payme', 'click', 'paynet', 'contact']) {
@@ -124,7 +128,7 @@ test('missing links keep visible buttons and honest alerts without changing stag
 test('callback actions require current consent and the profile owner’s private chat', async t => {
   const f = fixture(t);
   await f.fill();
-  for (const action of ['payme', 'click', 'paynet', 'contact', 'menu', 'status']) {
+  for (const action of ['payme', 'click', 'paynet', 'paynet_qr', 'contact', 'menu', 'status']) {
     const before = JSON.stringify(f.db);
     f.requests.length = 0;
     await f.bot.handleCallback(callback(101, 'payment:' + action), f.db);
@@ -186,7 +190,7 @@ for (const [name, config] of Object.entries({
     assert.equal(f.replies().length, 1);
     assert.equal(f.replies()[0].method, 'sendMessage');
     assert.equal(f.replies()[0].body.text, f.bot.paymentText());
-    assert.equal(buttons(f.replies()[0]).length, 4);
+    assert.equal(buttons(f.replies()[0]).length, 1);
   });
 }
 
@@ -228,7 +232,7 @@ test('receipt acknowledgment keeps payment and status controls while Google deli
   let releaseUpload, uploadStarted;
   const gate = new Promise(resolve => { releaseUpload = resolve; });
   const started = new Promise(resolve => { uploadStarted = resolve; });
-  const f = fixture(t, {}, async request => {
+  const f = fixture(t, { PAYNET_QR_PATH: true }, async request => {
     if (request.url === endpoint && request.body.imageUpload === 'true') { uploadStarted(); await gate; }
   });
   const photo = { photo: [{ file_id: 'OFFLINE_PHOTO', file_unique_id: 'OFFLINE_UNIQUE', file_size: 6 }] };
@@ -238,7 +242,7 @@ test('receipt acknowledgment keeps payment and status controls while Google deli
     await started;
     const ack = f.replies().find(reply => reply.body.text?.includes('Chekingiz qabul qilindi'));
     assert.ok(ack, 'Acknowledgment must not wait for Google');
-    assert.deepEqual(buttons(ack).map(button => button.callback_data), ['payment:payme', 'payment:click', 'payment:paynet', 'payment:contact', 'payment:menu', 'payment:status']);
+    assert.deepEqual(buttons(ack).map(button => button.callback_data), ['payment:paynet_qr', 'payment:contact', 'payment:menu', 'payment:status']);
     assert.equal(f.db.users['101'].step, 'done');
     assert.equal(f.db.payments[0].status, 'sending');
     await f.bot.handleCallback(callback(101, 'payment:status'), f.db);
@@ -254,4 +258,130 @@ test('receipt acknowledgment keeps payment and status controls while Google deli
   await f.bot.handleMessage(message(101, '', photo), f.db);
   assert.ok(buttons(f.replies().at(-1)).some(button => button.callback_data === 'payment:status'));
   assert.equal(f.googleRequests().length, 1, 'Menus and duplicate receipts must not upload again');
+});
+
+test('Paynet PDF-only button sends the original document after callback acknowledgment without state or Google writes', async t => {
+  const f = fixture(t, { PAYNET_QR_PATH: true, SERVICE_PRICE: '4 400 000 soʻm' });
+  await f.fill(); await f.consent();
+  assert.deepEqual(buttons(f.replies().at(-1)), [
+    { text: '💳 Paynet orqali toʻlash', callback_data: 'payment:paynet_qr' },
+    { text: '👨‍💼 Menejer bilan bogʻlanish', callback_data: 'payment:contact' },
+  ]);
+  const before = JSON.stringify(f.db);
+  for (const action of ['paynet_qr', 'paynet']) {
+    f.requests.length = 0;
+    await f.bot.handleCallback(callback(101, 'payment:' + action), f.db);
+    assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery', 'sendDocument']);
+    assert.notEqual(f.requests[0].body.show_alert, true);
+    const reply = f.requests[1];
+    assert.equal(reply.body.chat_id, '101');
+    assert.equal(reply.body.document.name, 'paynet-qr.pdf');
+    assert.equal(reply.body.document.type, 'application/pdf');
+    assert.deepEqual(Buffer.from(await reply.body.document.arrayBuffer()), pdfBytes);
+    assert.match(reply.body.caption, /4 400 000 soʻm/);
+    assert.match(reply.body.caption, /qabul qiluvchi va summani tekshiring/);
+    assert.match(reply.body.caption, /chekni shu botga yuboring/);
+    assert.doesNotMatch(reply.body.caption, /toʻlov tasdiqlandi/i);
+    assert.equal(f.googleRequests().length, 0);
+    assert.equal(JSON.stringify(f.db), before);
+  }
+});
+
+test('configured Paynet checkout and PDF appear separately while unavailable providers stay hidden', async t => {
+  const url = 'https://app.paynet.uz/OFFLINE_MERCHANT';
+  const f = fixture(t, { PAYNET_QR_PATH: true, PAYNET_URL: url });
+  await f.fill(); await f.consent();
+  assert.deepEqual(buttons(f.replies().at(-1)).slice(0, 2), [
+    { text: '💳 Paynet orqali toʻlash', url },
+    { text: '📄 Paynet QR-kodi', callback_data: 'payment:paynet_qr' },
+  ]);
+  assert.equal(buttons(f.replies().at(-1)).length, 3);
+  f.requests.length = 0;
+  await f.bot.handleCallback(callback(101, 'payment:paynet'), f.db);
+  assert.equal(f.requests.at(-1).method, 'sendDocument', 'A stale old Paynet callback should still open the configured PDF');
+});
+
+test('Paynet checkout works without a PDF and old callbacks reopen the current payment menu', async t => {
+  const url = 'https://app.paynet.uz/OFFLINE_MERCHANT';
+  const f = fixture(t, { PAYNET_URL: url });
+  await f.fill(); await f.consent();
+  assert.deepEqual(buttons(f.replies().at(-1)).map(button => button.url || button.callback_data), [url, 'payment:contact']);
+  f.requests.length = 0;
+  await f.bot.handleCallback(callback(101, 'payment:paynet'), f.db);
+  assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery', 'sendMessage']);
+  assert.equal(buttons(f.replies().at(-1))[0].url, url);
+  assert.equal(f.googleRequests().length, 0);
+});
+
+for (const scenario of ['missing', 'directory', 'invalid header', 'unreadable']) {
+  test('Paynet PDF ' + scenario + ' is hidden and its stale callback reports the problem without writing state', async t => {
+    const f = fixture(t, { PAYNET_QR_PATH: true });
+    await f.fill(); await f.consent();
+    if (scenario === 'missing') fs.unlinkSync(f.pdfPath);
+    else if (scenario === 'directory') { fs.unlinkSync(f.pdfPath); fs.mkdirSync(f.pdfPath); }
+    else if (scenario === 'invalid header') fs.writeFileSync(f.pdfPath, 'not a PDF file');
+    const originalOpen = fs.openSync;
+    if (scenario === 'unreadable') fs.openSync = (filePath, ...rest) => {
+      if (filePath === f.pdfPath) throw Object.assign(new Error('Synthetic permission denied'), { code: 'EACCES' });
+      return originalOpen(filePath, ...rest);
+    };
+    try {
+      const before = JSON.stringify(f.db);
+      f.requests.length = 0;
+      await f.bot.handleMessage(message(101, '/payment'), f.db);
+      assert.deepEqual(buttons(f.replies().at(-1)).map(button => button.callback_data), ['payment:contact']);
+      f.requests.length = 0;
+      for (const action of ['paynet_qr', 'paynet']) {
+        await f.bot.handleCallback(callback(101, 'payment:' + action), f.db);
+        assert.equal(f.requests.at(-1).method, 'answerCallbackQuery');
+        assert.equal(f.requests.at(-1).body.show_alert, true);
+        assert.match(f.requests.at(-1).body.text, /QR fayli hozir ochilmadi/);
+      }
+      assert.equal(f.googleRequests().length, 0);
+      assert.equal(f.requests.some(request => request.method === 'sendDocument'), false);
+      assert.equal(JSON.stringify(f.db), before);
+    } finally { fs.openSync = originalOpen; }
+  });
+}
+
+test('Paynet QR document requires the current consenting owner in a private chat', async t => {
+  const f = fixture(t, { PAYNET_QR_PATH: true });
+  await f.fill(); await f.consent();
+  const valid = { ...f.db.users['101'] };
+  for (const scenario of [
+    { event: callback(101, 'payment:paynet_qr', { from: { id: 42 } }) },
+    { event: callback(101, 'payment:paynet_qr', { message: { chat: { id: 101, type: 'group' } } }) },
+    { event: callback(101, 'payment:paynet_qr'), profile: { ...valid, offerAccepted: false } },
+    { event: callback(101, 'payment:paynet_qr'), profile: { ...valid, offerVersion: 'older-version' } },
+    { event: callback(101, 'payment:paynet_qr'), profile: { ...valid, step: 'name' } },
+    { event: callback(999, 'payment:paynet_qr') },
+  ]) {
+    f.db.users['101'] = scenario.profile || valid;
+    const before = JSON.stringify(f.db);
+    f.requests.length = 0;
+    await f.bot.handleCallback(scenario.event, f.db);
+    assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery']);
+    assert.match(f.requests[0].body.text, /rozilik/);
+    assert.equal(JSON.stringify(f.db), before);
+  }
+});
+
+test('Paynet upload failure is acknowledged promptly and offers retry without changing state', async t => {
+  const f = fixture(t, { PAYNET_QR_PATH: true }, request => {
+    if (request.method === 'sendDocument') throw new Error('Synthetic upload failure');
+  });
+  await f.fill(); await f.consent();
+  const before = JSON.stringify(f.db);
+  f.requests.length = 0;
+  const originalError = console.error;
+  const errors = [];
+  console.error = message => errors.push(message);
+  try { await f.bot.handleCallback(callback(101, 'payment:paynet_qr'), f.db); }
+  finally { console.error = originalError; }
+  assert.deepEqual(f.requests.map(request => request.method), ['answerCallbackQuery', 'sendDocument', 'sendMessage']);
+  assert.match(f.requests.at(-1).body.text, /yuborib boʻlmadi/);
+  assert.match(f.requests.at(-1).body.text, /qayta bosing/);
+  assert.equal(errors.length, 1);
+  assert.equal(JSON.stringify(f.db), before);
+  assert.equal(f.googleRequests().length, 0);
 });

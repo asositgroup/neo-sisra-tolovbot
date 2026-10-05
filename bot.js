@@ -67,6 +67,7 @@ function storageAction(fn) {
 }
 const WELCOME_IMAGE_PATH = process.env.WELCOME_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.WELCOME_IMAGE_PATH) : '';
 const PAYMENT_IMAGE_PATH = process.env.PAYMENT_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.PAYMENT_IMAGE_PATH) : '';
+const PAYNET_QR_PATH = process.env.PAYNET_QR_PATH ? path.resolve(BASE_DIR, process.env.PAYNET_QR_PATH) : '';
 const OFFER_DOC_PATH = process.env.OFFER_DOC_PATH ? path.resolve(BASE_DIR, process.env.OFFER_DOC_PATH) : '';
 const OFFER_VERSION = process.env.OFFER_VERSION || 'pending-2026-10-04';
 const API = 'https://api.telegram.org/bot' + BOT_TOKEN;
@@ -129,13 +130,44 @@ function retryKeyboard() {
   return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
 }
 function paymentKeyboard(withStatus = false) {
-  const rows = PAYMENT_PROVIDERS.map(provider => [{
+  const hasPaynetQr = paynetQrAvailable();
+  const rows = PAYMENT_PROVIDERS.filter(provider => provider.url || (provider.id === 'paynet' && hasPaynetQr)).map(provider => [{
     text: '💳 ' + provider.name + ' orqali toʻlash',
-    ...(provider.url ? { url: provider.url } : { callback_data: 'payment:' + provider.id }),
+    ...(provider.url ? { url: provider.url } : { callback_data: 'payment:paynet_qr' }),
   }]);
+  if (hasPaynetQr && PAYMENT_PROVIDERS.some(provider => provider.id === 'paynet' && provider.url)) {
+    rows.push([{ text: '📄 Paynet QR-kodi', callback_data: 'payment:paynet_qr' }]);
+  }
   rows.push([{ text: '👨‍💼 Menejer bilan bogʻlanish', ...(MANAGER_URL ? { url: MANAGER_URL } : { callback_data: 'payment:contact' }) }]);
   if (withStatus) rows.push([{ text: '💳 Toʻlov', callback_data: 'payment:menu' }, { text: '📋 Holat', callback_data: 'payment:status' }]);
   return { inline_keyboard: rows };
+}
+function paynetQrAvailable() {
+  if (!PAYNET_QR_PATH || path.extname(PAYNET_QR_PATH).toLowerCase() !== '.pdf') return false;
+  let descriptor;
+  try {
+    const stat = fs.statSync(PAYNET_QR_PATH);
+    if (!stat.isFile() || stat.size < 5 || stat.size > 50 * 1024 * 1024) return false;
+    descriptor = fs.openSync(PAYNET_QR_PATH, 'r');
+    const header = Buffer.alloc(5);
+    return fs.readSync(descriptor, header, 0, 5, 0) === 5 && header.toString('ascii') === '%PDF-';
+  } catch { return false; }
+  finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+}
+async function sendPaynetQr(cb, chatId) {
+  if (!paynetQrAvailable()) {
+    await answerCb(cb.id, 'Paynet QR fayli hozir ochilmadi. /payment orqali toʻlov maʼlumotlarini oching yoki menejer bilan bogʻlaning.', true);
+    return;
+  }
+  await answerCb(cb.id);
+  try {
+    await sendDocument(chatId, PAYNET_QR_PATH,
+      'Neo Sisra — Paynet orqali toʻlov\n\nVebinar narxi: ' + SERVICE_PRICE +
+      '\n\nPDF ichidagi QR-kodni qoʻllab-quvvatlaydigan toʻlov ilovasida skanerlang. Summa soʻralsa, yuqoridagi vebinar narxini kiriting. Toʻlovdan oldin qabul qiluvchi va summani tekshiring. Toʻlovdan soʻng chekni shu botga yuboring.');
+  } catch (error) {
+    console.error(safeError(error));
+    await sendMessage(chatId, 'Paynet QR faylini yuborib boʻlmadi. Tugmani qayta bosing yoki menejer bilan bogʻlaning.');
+  }
 }
 function hasCurrentConsent(profile) {
   return Boolean(profile?.offerAccepted && profile.offerVersion === OFFER_VERSION && ['receipt', 'done'].includes(profile.step));
@@ -235,7 +267,7 @@ async function sendDocument(chatId, filePath, caption = '') {
   const form = new FormData();
   form.append('chat_id', String(chatId));
   if (caption) form.append('caption', caption);
-  form.append('document', new Blob([bytes]), path.basename(filePath));
+  form.append('document', new Blob([bytes], { type: path.extname(filePath).toLowerCase() === '.pdf' ? 'application/pdf' : '' }), path.basename(filePath));
   return tgMultipart('sendDocument', form);
 }
 
@@ -808,6 +840,10 @@ async function handlePaymentCallback(cb, db) {
     return;
   }
   const action = cb.data.slice('payment:'.length);
+  if (action === 'paynet_qr' || (action === 'paynet' && PAYNET_QR_PATH)) {
+    await sendPaynetQr(cb, chatId);
+    return;
+  }
   if (action === 'menu' || action === 'status') {
     await answerCb(cb.id);
     if (action === 'menu') await sendPayment(chatId);
