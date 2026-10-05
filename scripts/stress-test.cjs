@@ -21,7 +21,7 @@ const EXPECTED_START_MESSAGE = [
   'Koreyada oʻqish va oʻqish davrida rasmiy ishlash imkoniyatlari.',
   'Koreyaga talaba yuborish va hujjatlarni rasmiylashtirish xizmati.',
   '',
-  '<b>50 kishi uchun maxsus taklif</b>',
+  '<b>100 kishi uchun maxsus taklif</b>',
   '',
   "📋 <b>Ro'yxatdan o'tish uchun ismingizni kiriting!</b>",
   '',

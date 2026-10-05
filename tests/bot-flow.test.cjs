@@ -65,7 +65,7 @@ for(const withImage of [false,true])test(`start sends one combined welcome and n
     const body=requests[0].body;
     const text=withImage?body.caption:body.text;
     assert.match(text,/Neo Sisra/);
-    assert.match(text,/50 kishi uchun maxsus taklif/);
+    assert.match(text,/100 kishi uchun maxsus taklif/);
     assert.match(text,/ismingizni kiriting/);
     assert.match(text,/Zebo Aliyeva/);
     assert.equal(body.parse_mode,'HTML');

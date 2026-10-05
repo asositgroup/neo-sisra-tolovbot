@@ -630,7 +630,7 @@ async function startRegistration(db, chatId, message) {
     step: 'name',
   };
   saveDb(db);
-  const welcome = '<b>Neo Sisra</b>\nKoreyada oʻqish va oʻqish davrida rasmiy ishlash imkoniyatlari.\nKoreyaga talaba yuborish va hujjatlarni rasmiylashtirish xizmati.\n\n<b>50 kishi uchun maxsus taklif</b>\n\n' + NAME_PROMPT;
+  const welcome = '<b>Neo Sisra</b>\nKoreyada oʻqish va oʻqish davrida rasmiy ishlash imkoniyatlari.\nKoreyaga talaba yuborish va hujjatlarni rasmiylashtirish xizmati.\n\n<b>100 kishi uchun maxsus taklif</b>\n\n' + NAME_PROMPT;
   if(WELCOME_IMAGE_PATH && fs.existsSync(WELCOME_IMAGE_PATH)) {
     await sendPhoto(chatId,WELCOME_IMAGE_PATH,welcome,removeKeyboard());
   } else {
