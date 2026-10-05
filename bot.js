@@ -66,6 +66,7 @@ function storageAction(fn) {
   }
 }
 const WELCOME_IMAGE_PATH = process.env.WELCOME_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.WELCOME_IMAGE_PATH) : '';
+const PAYMENT_IMAGE_PATH = process.env.PAYMENT_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.PAYMENT_IMAGE_PATH) : '';
 const OFFER_DOC_PATH = process.env.OFFER_DOC_PATH ? path.resolve(BASE_DIR, process.env.OFFER_DOC_PATH) : '';
 const OFFER_VERSION = process.env.OFFER_VERSION || 'pending-2026-10-04';
 const API = 'https://api.telegram.org/bot' + BOT_TOKEN;
@@ -80,6 +81,28 @@ const POLL_FETCH_TIMEOUT_MS = 35000;
 const SERVICE_NAME = 'Koreyaga talaba yuborish';
 const CONTACT_PHONE = process.env.CONTACT_PHONE || 'XXX';
 const CONTACT_ADMIN = process.env.CONTACT_ADMIN || '';
+function paymentUrl(value, domain) {
+  const candidate = String(value || '').trim();
+  if (!/^https:\/\/[^\s\\]+$/i.test(candidate)) return '';
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
+    if (url.hostname !== domain && !url.hostname.endsWith('.' + domain)) return '';
+    return url.href;
+  } catch { return ''; }
+}
+function managerUrl(value) {
+  const candidate = String(value || '').trim();
+  const username = candidate.match(/^@([a-z][a-z0-9_]{4,31})$/i)?.[1]
+    || candidate.match(/^https:\/\/t\.me\/([a-z][a-z0-9_]{4,31})\/?$/i)?.[1];
+  return username ? 'https://t.me/' + username : '';
+}
+const PAYMENT_PROVIDERS = [
+  { id: 'payme', name: 'Payme', url: paymentUrl(process.env.PAYME_URL, 'payme.uz') },
+  { id: 'click', name: 'Click', url: paymentUrl(process.env.CLICK_URL, 'click.uz') },
+  { id: 'paynet', name: 'Paynet', url: paymentUrl(process.env.PAYNET_URL, 'paynet.uz') },
+];
+const MANAGER_URL = managerUrl(CONTACT_ADMIN);
 const CHANNEL_URL = 'https://t.me/+q9W8PHE9qzpiZDQ1';
 const SERVICE_PRICE = process.env.SERVICE_PRICE || 'XXX';
 const PAYMENT_CARDS = [
@@ -98,10 +121,32 @@ function profileFor(row) {
   return {name:row.name, phone:row.phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
 }
 function contactText() {
-  return ['☎️ Telefon: '+escHtml(CONTACT_PHONE), CONTACT_ADMIN ? escHtml(CONTACT_ADMIN) : '', '<a href="'+CHANNEL_URL+'">Neo Sisra Telegram kanali</a>'].filter(Boolean).join('\n');
+  return ['☎️ Telefon: '+escHtml(CONTACT_PHONE), MANAGER_URL ? '<a href="'+MANAGER_URL+'">Menejer bilan bogʻlanish</a>' : '', '<a href="'+CHANNEL_URL+'">Neo Sisra Telegram kanali</a>'].filter(Boolean).join('\n');
 }
 function retryKeyboard() {
   return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
+}
+function paymentKeyboard(withStatus = false) {
+  const rows = PAYMENT_PROVIDERS.map(provider => [{
+    text: '💳 ' + provider.name + ' orqali toʻlash',
+    ...(provider.url ? { url: provider.url } : { callback_data: 'payment:' + provider.id }),
+  }]);
+  rows.push([{ text: '👨‍💼 Menejer bilan bogʻlanish', ...(MANAGER_URL ? { url: MANAGER_URL } : { callback_data: 'payment:contact' }) }]);
+  if (withStatus) rows.push([{ text: '💳 Toʻlov', callback_data: 'payment:menu' }, { text: '📋 Holat', callback_data: 'payment:status' }]);
+  return { inline_keyboard: rows };
+}
+function hasCurrentConsent(profile) {
+  return Boolean(profile?.offerAccepted && profile.offerVersion === OFFER_VERSION && ['receipt', 'done'].includes(profile.step));
+}
+async function sendPayment(chatId) {
+  const text = paymentText();
+  // The raw HTML length is a conservative bound on Telegram's parsed caption.
+  // A long configured contact/card value must remain complete, never truncated.
+  if (PAYMENT_IMAGE_PATH && fs.existsSync(PAYMENT_IMAGE_PATH) && text.length <= 1024) {
+    await sendPhoto(chatId, PAYMENT_IMAGE_PATH, text, paymentKeyboard());
+  } else {
+    await sendHtml(chatId, text, paymentKeyboard());
+  }
 }
 
 function emptyDb() {
@@ -303,10 +348,11 @@ function assetButtons(itemId, index, total) {
   return [row];
 }
 
-async function answerCb(id, text) {
+async function answerCb(id, text, showAlert = false) {
   try {
     const data = { callback_query_id: id };
     if (text) data.text = text;
+    if (showAlert) data.show_alert = true;
     await tg('answerCallbackQuery', data);
   } catch {
     // callback muddati o'tgan bo'lishi mumkin
@@ -453,7 +499,7 @@ async function deliverPayment(db,row) {
   } finally { paymentFlights.delete(row.id); }
   if(row.status==='sent') {
     if(!row.notified && NOTIFY_CHAT_ID) { row.notified=await notifyLeadChat('pay',row,{[row.receipt.kind==='photo'?'photo':'document']:row.receipt.kind==='photo'?[{file_id:row.receipt.fileId,file_unique_id:row.receipt.uniqueId}]:{file_id:row.receipt.fileId,mime_type:row.receipt.mimeType,file_name:row.receipt.fileName}});saveDb(db); }
-    try { await sendMessage(row.telegram_id,'✅ Chekingiz tekshirish uchun yuborildi. Natija boʻyicha siz bilan bogʻlanamiz.',keyboard([['📋 Holat']])); } catch(error) { console.error(safeError(error)); }
+    try { await sendMessage(row.telegram_id,'✅ Chekingiz tekshirish uchun yuborildi. Natija boʻyicha siz bilan bogʻlanamiz.',paymentKeyboard(true)); } catch(error) { console.error(safeError(error)); }
   }
 }
 function paymentText() {
@@ -742,13 +788,53 @@ async function handleOfferCallback(cb,db) {
   newRegistration(db,profile);
   pumpDeliveries(db);
   await answerCb(cb.id,'Roziligingiz qabul qilindi');
-  await sendHtml(chatId,paymentText(profile),removeKeyboard());
+  await sendPayment(chatId);
+}
+
+async function sendStatus(chatId, db) {
+  const row=[...db.payments].reverse().find(row=>row.telegram_id===chatId);
+  const registration=[...db.registrations].reverse().find(item=>item.telegram_id===chatId);
+  if(!row && registration && registration.status!=='sent') {await sendMessage(chatId,['pending','sending'].includes(registration.status)?'Maʼlumotlaringiz jadvalga yuborilyapti.':'Maʼlumotlaringiz jadvalga yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.',retryKeyboard());return;}
+  await sendMessage(chatId,row?(row.status==='sent'?'Chekingiz tekshirish uchun yuborilgan. Toʻlov natijasi boʻyicha siz bilan bogʻlanamiz.':['pending','sending'].includes(row.status)?'Chekingiz yuborilyapti. Natija shu yerda chiqadi.':'Chek yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.'):'Hali chek yubormagansiz.',row && row.status!=='sent'?retryKeyboard():undefined);
+}
+
+async function handlePaymentCallback(cb, db) {
+  const chatId = cb.message?.chat?.id;
+  const profile = db.users[userKey(chatId)];
+  if (cb.message?.chat?.type !== 'private' || cb.from?.id !== chatId || !hasCurrentConsent(profile)) {
+    await answerCb(cb.id, 'Avval roʻyxatdan oʻting va oferta shartlariga rozilik bering.', true);
+    return;
+  }
+  const action = cb.data.slice('payment:'.length);
+  if (action === 'menu' || action === 'status') {
+    await answerCb(cb.id);
+    if (action === 'menu') await sendPayment(chatId);
+    else await sendStatus(chatId, db);
+    return;
+  }
+  const provider = PAYMENT_PROVIDERS.find(item => item.id === action);
+  // A callback on an older message can outlive an administrator adding a URL.
+  if (provider?.url || (action === 'contact' && MANAGER_URL)) {
+    await answerCb(cb.id);
+    await sendPayment(chatId);
+  } else if (provider) {
+    await answerCb(cb.id, provider.name + ' orqali toʻlov uchun havola hali berilmagan. Toʻlov maʼlumotlarini menejerdan aniqlashtiring.', true);
+  } else if (action === 'contact') {
+    const phone = normalizePhone(CONTACT_PHONE);
+    await answerCb(cb.id, phone ? 'Menejer bilan bogʻlanish: ' + phone : 'Menejerning aloqa maʼlumoti hali berilmagan.', true);
+  } else {
+    await answerCb(cb.id, 'Bu tugma topilmadi. /payment orqali toʻlov oynasini oching.', true);
+  }
 }
 
 async function handleCallback(cb, db) {
   const data = String(cb.data || '');
   if (data.startsWith('offer:')) {
     await handleOfferCallback(cb, db);
+    return;
+  }
+  if (data.startsWith('payment:')) {
+    await handlePaymentCallback(cb, db);
     return;
   }
   if (!isAdminUser(cb.from)) {
@@ -892,6 +978,12 @@ async function handleMessage(message,db) {
   if(/^\/start(?:\s|$)/.test(text) || text==='Qayta boshlash' || WELCOME_BUTTONS.includes(text)) {await startRegistration(db,chatId,message);return;}
   const profile=db.users[userKey(chatId)];
   if(!profile) {await startRegistration(db,chatId,message);return;}
+  if(text==='/payment' || text==='💳 Toʻlov') {
+    if (hasCurrentConsent(profile)) await sendPayment(chatId);
+    else if (profile.step==='offer') await askOffer(chatId);
+    else await sendMessage(chatId,'Toʻlov maʼlumotlarini ochish uchun roʻyxatdan oʻtishni yakunlang va oferta shartlariga rozilik bering.');
+    return;
+  }
   if(text==='🔄 Qayta yuborish' || text==='/retry') {
     const rows=[...db.registrations,...db.payments].filter(row=>row.telegram_id===chatId && ['pending','failed'].includes(row.status));
     if(!rows.length) {await sendMessage(chatId,'Qayta yuboriladigan maʼlumot yoʻq.');return;}
@@ -902,10 +994,7 @@ async function handleMessage(message,db) {
     return;
   }
   if(text==='📋 Holat' || text==='/status') {
-    const row=[...db.payments].reverse().find(row=>row.telegram_id===chatId);
-    const registration=[...db.registrations].reverse().find(item=>item.telegram_id===chatId);
-    if(!row && registration && registration.status!=='sent') {await sendMessage(chatId,['pending','sending'].includes(registration.status)?'Maʼlumotlaringiz jadvalga yuborilyapti.':'Maʼlumotlaringiz jadvalga yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.',retryKeyboard());return;}
-    await sendMessage(chatId,row?(row.status==='sent'?'Chekingiz tekshirish uchun yuborilgan. Toʻlov natijasi boʻyicha siz bilan bogʻlanamiz.':['pending','sending'].includes(row.status)?'Chekingiz yuborilyapti. Natija shu yerda chiqadi.':'Chek yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.'):'Hali chek yubormagansiz.',row && row.status!=='sent'?retryKeyboard():undefined);return;
+    await sendStatus(chatId,db);return;
   }
   if(profile.step==='name') {
     if(!isPlainNameText(message)||!text||/[\u0000-\u001f\u007f]/.test(text)) {await askName(chatId);return;}
@@ -924,12 +1013,12 @@ async function handleMessage(message,db) {
     const receipt=extractReceipt(message);
     if(!receipt||receipt.fileSize>10*1024*1024) {await sendMessage(chatId,'Toʻlov chekini PNG, JPG yoki PDF qilib yuboring. Hajmi 10 MB dan oshmasin.');return;}
     const existing=storageAction(() => storage().findReceipt({telegram_id:chatId,name:profile.name,phone:profile.phone,offer_version:profile.offerVersion,receipt}));
-    if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?undefined:retryKeyboard());return;}
+    if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?paymentKeyboard(true):retryKeyboard());return;}
     const parts=nowParts();
     const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
     db.payments.push(row);profile.step='done';saveDb(db);
     pumpDeliveries(db);
-    await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.\n\n'+contactText(),keyboard([['📋 Holat']]));return;
+    await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.\n\n'+contactText(),paymentKeyboard(true));return;
   }
 }
 function recoverInterrupted(db) {

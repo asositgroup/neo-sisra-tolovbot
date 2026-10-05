@@ -1,0 +1,10 @@
+Use case: logo-brand
+Asset type: Telegram bot avatar and payment message header, one square 1024×1024 raster graphic.
+Primary request: Create a polished professional temporary identity graphic for NEO SISRA, an Uzbek education consulting bot. A bold editorial branding poster that is strongly recognizable as a small round Telegram profile picture.
+Scene/backdrop: warm charcoal background with subtle elegant Korean campus architecture and traditional roof silhouettes, subdued light-blue and orange atmospheric light. Keep architecture restrained and secondary to the lettering.
+Subject: huge dominant centered NEO SISRA wordmark in two lines, NEO above SISRA, with the smaller centered label TO‘LOV BOTI below.
+Style/medium: contemporary premium editorial brand graphic; very bold condensed uppercase sans-serif typography similar to condensed YUbuyan; clean crisp typesetting, visually rich subtle architectural backdrop, professional spacing.
+Composition/framing: square full bleed. All main text must be entirely within the central 70% of the image and comfortably survive a circular profile crop; dominant two-line wordmark has generous breathing space but is easily readable at small size. Label below wordmark is clearly legible. Architecture in background around outer areas.
+Color palette: warm dark #1C1915, white #FFFFFF, light blue #6E9EFF and restrained orange #FF5722 accents. White dominant wordmark, a small orange or light-blue accent treatment for the label.
+Text (verbatim): "NEO" on first line; "SISRA" on second line; "TO‘LOV BOTI" as small label below. Render precisely these words and no other writing. Uzbek apostrophe in TO‘LOV must remain visible.
+Constraints: no people, no university logos, no other brands, no financial numbers, no fake payment cards, no benefit claims, no slogans, no watermark, no additional words, no mockup frame. Opaque background. Output exactly one square image.

@@ -1,5 +1,7 @@
 # Serverga o‘rnatish va xizmatni boshqarish
 
+Botning rasmi, bio, Payme/Click/Paynet tugmalari va profilni o‘rnatish uchun [profil va to‘lov oynasi qo‘llanmasi](BOT_PROFILE.md)ga qarang.
+
 Bu yo‘riqnoma **yangi Ubuntu 24.04 serveriga** birinchi o‘rnatish uchun. Ishlayotgan Neo Sisra serverida boshlang‘ich o‘rnatish buyruqlarini qayta bajarmang. Mavjud serverda yangilash uchun GitHub’dagi `main` branchiga commit yuborish yetarli; holatni tekshirish buyruqlari quyida berilgan.
 
 Hozirgi kod `@neo_sisrabot` uchun: ishga tushishda Telegram’dan olingan username aynan `neo_sisrabot` ekanini tekshiradi. Boshqa bot tokenini kiritishning o‘zi yetarli emas. Boshqa loyihaga moslashda shu tekshiruv, bot matnlari va havolalari, Google endpointi, deploy fayllaridagi qat’iy yo‘llar hamda repo manzillari ham alohida moslanadi.
