@@ -534,7 +534,8 @@ async function deliverPayment(db,row) {
 }
 function paymentText() {
   const cards=PAYMENT_CARDS.map(c=>'<b>'+escHtml(c.bank)+'</b>\n<code>'+escHtml(c.number)+'</code>\nKarta egasi: '+escHtml(c.holder)).join('\n\n');
-  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Oddiy narx: <b>'+escHtml(REGULAR_SERVICE_PRICE)+'</b>','Vebinar narxi — toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.'].join('\n');
+  const contact = normalizePhone(CONTACT_PHONE) ? ['', '☎️ Telefon: '+escHtml(CONTACT_PHONE.trim())] : [];
+  return ['✅ <b>Maʼlumotlaringiz qabul qilindi.</b>','','<b>Neo Sisra — '+SERVICE_NAME+'</b>','Hujjatlarni rasmiylashtirish xizmati.','Oddiy narx: <b>'+escHtml(REGULAR_SERVICE_PRICE)+'</b>','Vebinar narxi — toʻlov miqdori: <b>'+escHtml(SERVICE_PRICE)+'</b>','','💳 <b>Toʻlov rekvizitlari:</b>',cards,'','📎 Toʻlov chekini shu yerga yuboring. PNG, JPG yoki PDF, hajmi 10 MB gacha.','Toʻlov admin tomonidan tekshiriladi.',...contact].join('\n');
 }
 
 function xmlCell(value) {
