@@ -25,7 +25,7 @@ DELIVERY_WORKERS=4
 TELEGRAM_MESSAGES_PER_SECOND=28
 ```
 
-O‘zgartirgach botni qayta ishga tushiring. Sonlarni kattalashtirish Telegram yoki Google kvotasini oshirmaydi. Masalan, 28 xabar/soniya sozlamasida 100 ta alohida xabarning yuborilishi ideal sharoitda ham bir necha soniyaga taqsimlanadi. `/start` salomlashuvni, sozlangan bo‘lsa rasmni, so‘ng ism so‘rashni alohida xabarlar bilan aynan shu tartibda yuboradi. Parallel ishlash turli foydalanuvchilar orasida bo‘ladi. 100 kishiga bittadan salomlashuv 100 ta xabar, salomlashuv va ism so‘rash esa jami 200 ta xabar degani; ishlovchilar sonini oshirish Telegram yuborish limitini oshirmaydi.
+O‘zgartirgach botni qayta ishga tushiring. Sonlarni kattalashtirish Telegram yoki Google kvotasini oshirmaydi. Masalan, 28 xabar/soniya sozlamasida 100 ta alohida xabarning yuborilishi ideal sharoitda ham bir necha soniyaga taqsimlanadi. `/start` salomlashuv va ism so‘rashni bitta HTML xabarda yuboradi; rasm sozlangan va mavjud bo‘lsa, shu matn bitta rasm xabarining izohi bo‘ladi. Ism, telefon, oferta va chek bosqichlari keyin o‘z tartibida davom etadi. Parallel ishlash turli foydalanuvchilar orasida bo‘ladi. 100 kishining `/start` so‘rovi endi jami 100 ta chiqish xabarini hosil qiladi; ishlovchilar sonini oshirish Telegram yuborish limitini oshirmaydi.
 
 Telegram bepul yuborish uchun bir chatda taxminan 1 xabar/soniya, guruhda 20 xabar/daqiqa va ommaviy yuborishda taxminan 30 xabar/soniya chegaralarini tavsiya qiladi. Ushbu bot pullik broadcast rejimini yoqmaydi. [Telegram rasmiy FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
 
@@ -85,7 +85,7 @@ Qayta bajariladigan offline yuklama sinovi:
 node scripts/benchmark.cjs
 ```
 
-2026-10-05 kuni Linux serverda Node 22.23.0 bilan, tarmoqdan ajratilgan alohida foydalanuvchi ostida o‘lchandi. Har Telegram javobi sun’iy 100 ms; haqiqiy 28 xabar/soniya va 1050 ms chat oralig‘i, 100 ta update ishlovchisi qo‘llandi. Har bir foydalanuvchi bir paytda `/start` yuboradi va alohida salomlashuv, keyin ism so‘rash xabarini oladi; xabarlar birlashtirilmagan. Har senariy yangi vaqtinchalik baza bilan boshlanadi. Google, haqiqiy Telegram, katta fayllar va uzoq muddatli trafik bu sinovga kirmaydi.
+Hozirgi skript bitta birlashtirilgan `/start` javobini tekshiradi. Quyidagi jadval esa 2026-10-05 kuni Linux serverda Node 22.23.0 bilan o‘lchangan **avvalgi ikki xabarli versiya** natijasidir. Tarmoqdan ajratilgan alohida foydalanuvchi ishlatilgan. Har Telegram javobi sun’iy 100 ms; haqiqiy 28 xabar/soniya va 1050 ms chat oralig‘i, 100 ta update ishlovchisi qo‘llangan. Har bir foydalanuvchi bir paytda `/start` yuborib, alohida salomlashuv, keyin ism so‘rash xabarini olgan. Har senariy yangi vaqtinchalik baza bilan boshlangan. Google, haqiqiy Telegram, katta fayllar va uzoq muddatli trafik bu sinovga kirmaydi.
 
 | Birdan kelgan foydalanuvchi | Chiqish xabarlari | Oxirgi salomlashuv | Ism so‘rash uchun p95 | Oxirgi ism so‘rash |
 | --- | --- | --- | --- | --- |
@@ -93,7 +93,50 @@ node scripts/benchmark.cjs
 | 50 | 100 | 1,91 soniya | 3,65 soniya | 3,72 soniya |
 | 100 | 200 | 3,74 soniya | 7,19 soniya | 7,37 soniya |
 
-Bu botning konkret simulyatsiyadagi natijasi. Oldingi 32 ishlovchi / 25 xabar-soniya sozlamasida xuddi shu server sinovida 100 kishining oxirgi salomlashuvi 7,97 soniya, ism so‘rashi 9,02 soniya bo‘lgan. Reklamadagi haqiqiy javob vaqti tashqi xizmatlar va trafik tarkibiga qarab o‘zgaradi. 100 kishiga ketma-ket ikki xabar — jami 200 xabar — yuborishni bepul rejimda 2–3 soniyaga kafolatlash mumkin emas; `async/await` Telegram limitini oshirmaydi.
+Bu botning avvalgi versiyasi uchun konkret simulyatsiya natijasi. Undan oldingi 32 ishlovchi / 25 xabar-soniya sozlamasida xuddi shu server sinovida 100 kishining oxirgi salomlashuvi 7,97 soniya, ism so‘rashi 9,02 soniya bo‘lgan. Reklamadagi haqiqiy javob vaqti tashqi xizmatlar va trafik tarkibiga qarab o‘zgaradi. Xabarlarni birlashtirish chiqish yukini kamaytiradi, `async/await` esa Telegram limitini oshirmaydi.
+
+### 1 500 foydalanuvchi: avvalgi ikki xabarli sinov
+
+2026-10-05 kuni amaldagi `ed013d10617952b80c90c2bc68ae804f1f3dce14` release nusxasi Linux serverda sinovdan o‘tdi. Barcha olti runtime faylining SHA-256 qiymati ishlayotgan release bilan solishtirildi. Alohida test foydalanuvchisi, yopiq tashqi tarmoq, ko‘pi bilan bitta CPU yadrosi va 512 MiB xotira chegarasi ishlatildi. Asosiy bot jarayoni test oldidan, davomida va undan keyin faol bo‘ldi; PID o‘zgarmadi va restart soni 0 qoldi.
+
+Barcha 1 500 ta `/start` bir umumiy boshlanish vaqtida tayyor deb olindi. Haqiqiy polling mantig‘i ularni 100 tadan, oldingi paket tugagach qabul qildi: 15 ta to‘liq paket va yakuniy bo‘sh poll. Har bir foydalanuvchiga salomlashuv, keyin ism so‘rash yuborildi. Quyidagi kutish vaqtlari paket boshidan emas, barcha 1 500 foydalanuvchining umumiy kelish vaqtidan o‘lchangan.
+
+| Ko‘rsatkich | Natija |
+| --- | --- |
+| Bajarilgan `/start` / javob xabarlari | 1 500 / 3 000 |
+| Birinchi javob: 50% / 95% / oxirgi foydalanuvchi | 53,425 / 103,895 / 106,602 soniya |
+| Ism so‘rash: 50% / 95% / oxirgi foydalanuvchi | 57,043 / 107,520 / 110,239 soniya |
+| To‘liq test vaqti | 110,246 soniya |
+| Xato / tartib buzilishi | 0 / 0 |
+| Saqlangan foydalanuvchi / oxirgi update ID | 1 500 / 1 500 |
+| Jarayon RSS xotirasining eng yuqori qiymati | 78,125 MiB |
+| O‘rtacha CPU, bir yadroga nisbatan | 3,15% |
+| Bir soniyadagi eng ko‘p xabar boshlanishi | 28 |
+
+[To‘liq JSON hisobot](../reports/stress-1500-2026-10-05.json) barcha 20 ta tekshiruvdan o‘tgan: ikki javobning ketma-ketligi, polling chegaralari, SQLite’dagi yakuniy holat, bo‘sh navbat va tashqi Google so‘rovlari yo‘qligi tekshirildi. Test yozuvlari ishlayotgan bot bazasiga qo‘shilmadi.
+
+Bu natija aynan offline `/start` navbatini bo‘shatish vaqtidir. Telegram javobi sun’iy 100 ms, polling javobi darhol qaytadi; haqiqiy Telegram tarmog‘i, 429, Google, chek fayllari, webhook HTTP yuklamasi va davomli trafik sinalmagan. 1 500 soni bir vaqtda ishlayotgan handlerlar soni emas. Testda xatolar kuzatilmagan bo‘lsa ham, 1 500 kishiga 2–3 soniyada javob berish isbotlanmagan: amaldagi 28 xabar/soniya sozlamasida 3 000 ta chiqish xabari navbatda kutadi.
+
+### 1 500 foydalanuvchi: hozirgi bitta xabarli sinov
+
+```bash
+node scripts/stress-test.cjs --users 1500 --latency-ms 100 --output reports/stress-1500.json
+```
+
+`--output` uchun ota papka mavjud bo‘lishi kerak; parametr berilmasa JSON hisobot terminalga chiqadi. Sinov 1–1 500 foydalanuvchini qabul qiladi, alohida vaqtinchalik bazani yaratib, yakunda tozalaydi. Haqiqiy token va `.env` yuklanmaydi; tashqi HTTP chaqiruvlari simulyatsiya qilinadi. 15 soniyada bajarilish holati stderr orqali chiqadi. Rasmli variantning bitta caption bilan yuborilishi `bot-flow` testlarida tekshiriladi; ushbu yuklama sinovida rasm yo‘q.
+
+2026-10-05 kuni salomlashuv va ism so‘rash birlashtirilgach, ayni server va izolyatsiya sozlamalarida test takrorlandi. Telegram javobi sun’iy 100 ms, 100 ta update ishlovchisi va 28 xabar/soniya tezligi saqlandi. Barcha 1 500 so‘rov umumiy T0 vaqtida tayyor, polling paketlari oldingidek 100 tadan. Yangi [JSON hisobot](../reports/stress-1500-single-reply-2026-10-05.json) barcha 21 ta tekshiruvdan o‘tdi.
+
+| Ko‘rsatkich | Avval: ikki xabar | Hozir: bitta xabar |
+| --- | --- | --- |
+| 1 500 ta `/start` uchun javoblar | 3 000 | 1 500 |
+| Oxirgi foydalanuvchiga birinchi javob | 106,602 soniya | 55,919 soniya |
+| Foydalanuvchilarning 95%iga ism so‘rash yetishi | 107,520 soniya | 53,194 soniya |
+| Barcha ishlar tugashi | 110,246 soniya | 55,926 soniya |
+| Xatolar | 0 | 0 |
+| SQLite’da ism kiritishni kutayotgan foydalanuvchilar | 1 500 | 1 500 |
+
+Yangi sinovda birinchi javob va ism so‘rash aynan bitta xabardir; 50% foydalanuvchiga 28,115 soniyada yetgan. Peak RSS 74,426 MiB, o‘rtacha CPU bitta yadroning 3,74%i. Natija bu offline navbat sinovida umumiy vaqt taxminan yarmiga qisqarganini ko‘rsatadi. Haqiqiy Telegram tarmog‘i, 429, Google va davomli trafik o‘lchanmagan; 1 500 foydalanuvchining hammasiga 2–3 soniyada javob kafolati berilmaydi.
 
 Reklama oqimini oshirishda oddiy javoblarning p95 vaqti, `pending` ishlarning soni/yoshi, Google va Telegram xatolari, RAM va diskni kuzating. Yuborish ishlovchilari yoki Telegram tezligini faqat kuzatilgan ehtiyoj va xizmat limitlari asosida o‘zgartiring. Hozir monitoring uchun tashqi dashboard va avtomatik alert sozlanmagan; xizmat loglari [server qo‘llanmasida](DEPLOYMENT.md#kundalik-boshqaruv) berilgan.
 

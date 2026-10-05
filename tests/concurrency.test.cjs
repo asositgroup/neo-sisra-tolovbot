@@ -98,14 +98,14 @@ test('default polling admits all 100 independent starts before any handler finis
     gate.resolve();
     await running;
   }
-  assert.equal(wire.requests.length, 200);
+  assert.equal(wire.requests.length, 100);
   for (let chatId = 10000; chatId < 10100; chatId++) {
     const replies = wire.requests.filter(request => request.body.chat_id === chatId);
-    assert.equal(replies.length, 2);
+    assert.equal(replies.length, 1);
     assert.ok(replies.every(request => request.method === 'sendMessage'));
     assert.match(replies[0].body.text, /Neo Sisra/);
-    assert.doesNotMatch(replies[0].body.text, /ismingizni kiriting/);
-    assert.match(replies[1].body.text, /ismingizni kiriting/);
+    assert.match(replies[0].body.text, /ismingizni kiriting/);
+    assert.deepEqual(replies[0].body.reply_markup, { remove_keyboard: true });
   }
   const saved = readState({ dataDir: f.dataDir });
   assert.equal(saved.last_update_id, 100);
@@ -218,7 +218,7 @@ test('a blocked broadcast network request does not hold an independent user conv
   });
   const running = runtime.run();
   try {
-    await until(() => copyStarted && wire.requests.filter(request => request.body.chat_id === 77 && request.method === 'sendMessage').length === 2);
+    await until(() => copyStarted && wire.requests.filter(request => request.body.chat_id === 77 && request.method === 'sendMessage').length === 1);
     assert.ok(wire.requests.some(request => request.body.chat_id === 77 && request.body.text?.includes('ismingizni kiriting')));
     assert.equal(readState({ dataDir: f.dataDir }).users['77'].step, 'name');
     assert.equal(readState({ dataDir: f.dataDir }).broadcast_job.in_flight, true);

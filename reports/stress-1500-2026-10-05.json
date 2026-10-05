@@ -1,0 +1,117 @@
+{
+  "kind": "offline-long-polling-stress-test",
+  "passed": true,
+  "scenario": "All synthetic /start updates arrive at a common T0; real polling admits batches of at most 100.",
+  "limitations": [
+    "Telegram transport is mocked; no real Telegram delivery or 429 behavior is measured.",
+    "No HTTP webhook endpoint, Google registration, payment, or file-upload workload is exercised.",
+    "The user count is incoming JSON updates, not simultaneous handlers or webhook virtual users.",
+    "Per-fetch simulated latency applies to outgoing sendMessage; getUpdates responds immediately."
+  ],
+  "configuration": {
+    "users": 1500,
+    "simulatedSendLatencyMs": 100,
+    "updateWorkers": 100,
+    "telegramMessagesPerSecond": 28,
+    "telegramConcurrency": 16,
+    "telegramMaxPending": 500,
+    "perChatPacingMs": 1050,
+    "deadlineSeconds": 300,
+    "node": "v22.23.0",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "sourceSha256": {
+    "bot.js": "30755de90877f7abaa7913561275fa7be5614d2c9ac9ba00a9ec5fdeafedb3c3",
+    "google-delivery.cjs": "40dc43e2ffcc1fdafbf8cb89ba3efdb62bdf0e5b35a785b3596615490fc50481",
+    "telegram-http.cjs": "6778af78558928e5d0edf934252d93e733510897edc81b7ec08ee321d576f361",
+    "state-store.cjs": "0f51ff90a7b0b11df07402422716cbeb8b6da510be2e8728a613e7d2c9cb92e8",
+    "work-queue.cjs": "693165da65bb100f049acdb3cccc3e085ce0a90f8bc6ac6fcc87b79cf64026bd",
+    "telegram-queue.cjs": "4e01e87cf7fa0de26aa88badf75c3efc60f92482257d6495e2d840876acdfa79"
+  },
+  "totals": {
+    "wallSeconds": 110.246,
+    "inputUpdates": 1500,
+    "admittedUpdates": 1500,
+    "pollCalls": 16,
+    "maxPollBatch": 100,
+    "outboundMessages": 3000,
+    "deliveredMessages": 3000,
+    "googleRequests": 0,
+    "orderErrors": 0,
+    "protocolErrors": 0,
+    "batchBarrierErrors": 0,
+    "safeErrorCount": 0
+  },
+  "latencySecondsFromCommonBurstT0": {
+    "firstReply": {
+      "count": 1500,
+      "p50": 53.425,
+      "p95": 103.895,
+      "p99": 106.059,
+      "max": 106.602
+    },
+    "secondNamePrompt": {
+      "count": 1500,
+      "p50": 57.043,
+      "p95": 107.52,
+      "p99": 109.697,
+      "max": 110.239
+    },
+    "pollingAdmissionWait": {
+      "count": 1500,
+      "p50": 51.534,
+      "p95": 102.904,
+      "p99": 102.904,
+      "max": 102.904
+    }
+  },
+  "resources": {
+    "peakTelegramActive": 3,
+    "peakTelegramPendingSampled": 99,
+    "peakTelegramTotalSampled": 100,
+    "maxSendStartsInRollingSecond": 28,
+    "peakRssMiB": 78.125,
+    "peakHeapUsedMiBSampled": 16.248,
+    "sampleIntervalMs": 50,
+    "cpuUserSeconds": 2.88,
+    "cpuSystemSeconds": 0.593,
+    "cpuPercentOfOneCore": 3.15,
+    "eventLoopDelayMs": {
+      "p95": 21.152,
+      "max": 78.709,
+      "resolutionMs": 20
+    }
+  },
+  "persisted": {
+    "users": 1500,
+    "lastUpdateId": 1500,
+    "completedUpdateIds": 0
+  },
+  "invariants": {
+    "runtimeCompleted": true,
+    "deadlineMet": true,
+    "productionDefaultsVerified": true,
+    "allUpdatesAdmitted": true,
+    "pollBatchAtMost100": true,
+    "expectedPollCount": true,
+    "pollOffsetsValid": true,
+    "eachPollWaitedForPriorBatch": true,
+    "twoDeliveredMessagesPerUser": true,
+    "welcomeBeforeNamePrompt": true,
+    "persistedUserCount": true,
+    "allPersistedUsersAwaitName": true,
+    "persistedLastUpdateId": true,
+    "emptyCompletedUpdateIds": true,
+    "noRegistrationOrPaymentRows": true,
+    "noGoogleRequests": true,
+    "noNetworkBypassAttempts": true,
+    "telegramConcurrencyBound": true,
+    "telegramQueueDrained": true,
+    "noErrors": true
+  },
+  "errors": {},
+  "warnings": {
+    "sqliteExperimentalWarnings": 1
+  }
+}
