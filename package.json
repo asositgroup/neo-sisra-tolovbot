@@ -1,14 +1,14 @@
 {
   "name": "neo-sisra-pay-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "check": "node --check bot.js && node --check google-delivery.cjs && node --check telegram-http.cjs",
+    "check": "node --check bot.js && node --check google-delivery.cjs && node --check telegram-http.cjs && node --check state-store.cjs && node --check work-queue.cjs && node --check telegram-queue.cjs",
     "test": "node --test tests/*.test.cjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   }
 }

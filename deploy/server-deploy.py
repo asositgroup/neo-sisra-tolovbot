@@ -32,14 +32,18 @@ CURRENT = BASE / "current"
 LOCK = Path("/run/lock/neo-sisra-pay-bot-deploy.lock")
 UNIT = "neo-sisra-pay-bot.service"
 RUNTIME_USER = "neo-sisra-bot"
-FILES = frozenset(("bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json"))
-JS_FILES = ("bot.js", "google-delivery.cjs", "telegram-http.cjs")
+LEGACY_FILES = frozenset(("bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json"))
+FILES = LEGACY_FILES | frozenset(("state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"))
+SUPPORTED_FILES = (LEGACY_FILES, FILES)
+EXPORT_WRAPPER = Path("/usr/local/libexec/neo-sisra-export-state")
+EXPORT_MODULE = Path("/usr/local/lib/neo-sisra-bot/state-store.cjs")
+SQLITE_NAME = "bot_state.sqlite"
 STATE_NAMES = frozenset((".env", "data"))
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 INVOCATION_PATTERN = re.compile(r"[0-9a-f]{32}\Z", re.ASCII)
 MAX_ARCHIVE = 16 * 1024 * 1024
 MAX_FILE = 4 * 1024 * 1024
-MAX_EXPANDED = 17 * 1024 * 1024
+MAX_EXPANDED = 29 * 1024 * 1024
 READY_LINE = b"Neo Sisra polling ready."
 RESTART_TIMEOUT = 330  # Unit's graceful stop may take up to 260 seconds.
 READY_TIMEOUT = 60
@@ -101,9 +105,17 @@ def previous_release():
         raise DeploymentError("current fallback must refer to releases/<full-commit-SHA>")
     secure_directory(release)
     check_state_links(release)
-    for name in FILES:
+    for name in release_files(release):
         check_code_file(release / name)
     return release
+
+
+def release_files(release):
+    names = frozenset(entry.name for entry in release.iterdir())
+    files = names - STATE_NAMES
+    if files not in SUPPORTED_FILES or names != files | STATE_NAMES:
+        raise DeploymentError("release contains unexpected files or an incomplete runtime")
+    return files
 
 
 def check_code_file(path):
@@ -192,7 +204,7 @@ def extract_archive(source, staging):
             entry = tarfile.TarInfo.frombuf(block, "utf-8", "strict")
             if (entry.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
                     or entry.name not in FILES or entry.linkname):
-                raise DeploymentError("archive must contain only the four allowed regular files")
+                raise DeploymentError("archive must contain only allowed regular runtime files")
             if entry.name in found:
                 raise DeploymentError("archive contains a duplicate file")
             if entry.size < 0 or entry.size > MAX_FILE:
@@ -216,8 +228,8 @@ def extract_archive(source, staging):
         raise DeploymentError("archive is malformed or could not be safely extracted") from None
     finally:
         archive.stream.close()
-    if found != FILES:
-        raise DeploymentError("archive is missing required files")
+    if frozenset(found) not in SUPPORTED_FILES:
+        raise DeploymentError("archive requires either the complete legacy or current runtime")
     return hashes
 
 
@@ -231,8 +243,8 @@ def command(arguments, timeout=15, capture=False):
         raise DeploymentError("a required deployment command failed or timed out") from None
 
 
-def validate_javascript(release):
-    for name in JS_FILES:
+def validate_javascript(release, files):
+    for name in sorted(files - {"package.json"}):
         result = command(["/usr/sbin/runuser", "-u", RUNTIME_USER, "--",
                           "/usr/bin/node", "--check", str(release / name)], timeout=30)
         if result.returncode != 0:
@@ -241,10 +253,11 @@ def validate_javascript(release):
 
 def same_release(release, expected_hashes):
     secure_directory(release)
-    if {entry.name for entry in release.iterdir()} != FILES | STATE_NAMES:
-        raise DeploymentError("existing commit release contains unexpected files")
+    files = release_files(release)
+    if files != frozenset(expected_hashes):
+        raise DeploymentError("existing commit release does not match the uploaded files")
     check_state_links(release)
-    for name in FILES:
+    for name in files:
         check_code_file(release / name)
         if hashlib.sha256((release / name).read_bytes()).hexdigest() != expected_hashes[name]:
             raise DeploymentError("existing commit release does not match the uploaded files")
@@ -279,6 +292,42 @@ def invocation_id(timeout=15):
 def restart_service():
     if command(["/usr/bin/systemctl", "restart", UNIT], timeout=RESTART_TIMEOUT).returncode != 0:
         raise DeploymentError("service restart failed")
+
+
+def stop_service():
+    if command(["/usr/bin/systemctl", "stop", UNIT], timeout=RESTART_TIMEOUT).returncode != 0:
+        raise DeploymentError("service could not be stopped for legacy state export")
+    result = command(["/usr/bin/systemctl", "show", "--property=ActiveState", "--value", UNIT],
+                     capture=True)
+    if result.returncode != 0 or result.stdout.strip() not in (b"inactive", b"failed"):
+        raise DeploymentError("service stop could not be confirmed before legacy state export")
+
+
+def prepare_activation(release):
+    """A legacy release may start only after the authoritative DB is exported.
+
+    Stop first even if SQLite is not present yet: a migrating process could
+    create it while we inspect state. No release-provided code runs as root;
+    the exporter and its module are separately reviewed, root-installed files.
+    """
+    if release_files(release) != LEGACY_FILES:
+        return
+    stop_service()
+    try:
+        metadata = (BASE / "data" / SQLITE_NAME).lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        raise DeploymentError("SQLite state must be a regular file before legacy export")
+    for directory in (EXPORT_WRAPPER.parent, EXPORT_MODULE.parent, EXPORT_MODULE.parent.parent):
+        secure_directory(directory)
+    check_code_file(EXPORT_WRAPPER)
+    check_code_file(EXPORT_MODULE)
+    exported = command([
+        "/usr/sbin/runuser", "-u", RUNTIME_USER, "--", "/usr/bin/node", str(EXPORT_WRAPPER),
+    ], timeout=60)
+    if exported.returncode != 0:
+        raise DeploymentError("legacy state export failed; legacy release was not started")
 
 
 def service_active(timeout=15):
@@ -333,7 +382,7 @@ def deploy(sha, source):
         for name in STATE_NAMES:
             (staging / name).symlink_to(BASE / name, target_is_directory=(name == "data"))
         staging.chmod(0o755)
-        validate_javascript(staging)
+        validate_javascript(staging, frozenset(hashes))
         release = RELEASES / sha
         if release.exists() or release.is_symlink():
             same_release(release, hashes)
@@ -344,6 +393,7 @@ def deploy(sha, source):
         # Treat any failure during/after the atomic switch as a rollback case,
         # including a directory fsync failure after os.replace has succeeded.
         try:
+            prepare_activation(release)
             switch_current(release)
             restart_service()
             wait_ready(old_invocation)
@@ -352,6 +402,7 @@ def deploy(sha, source):
             for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
                 signal.signal(signum, signal.SIG_IGN)
             try:
+                prepare_activation(previous)
                 switch_current(previous)
                 failed_invocation = invocation_id()
                 restart_service()

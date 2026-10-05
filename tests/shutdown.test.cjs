@@ -1,11 +1,11 @@
-const { test, after } = require('node:test');
+const { test, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-sisra-shutdown-test-'));
-const dbPath = path.join(directory, 'bot_data.json');
+let dbPath, testDirectory;
 process.env.DATA_DIR = directory;
 process.env.BOT_TOKEN = '123456:FAKE_TOKEN_FOR_OFFLINE_TESTS';
 process.env.GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/TEST_ONLY/exec';
@@ -27,7 +27,15 @@ globalThis.fetch = async (url, options = {}) => {
   if (target.includes('/getUpdates?')) throw new Error('Unexpected additional polling request');
   return Response.json({ ok: true, result: { message_id: 1 } });
 };
-const bot = require('../bot.js');
+const {createBot} = require('../bot.js');
+const {readState} = require('../state-store.cjs');
+let bot;
+beforeEach(()=>{
+  testDirectory=fs.mkdtempSync(path.join(directory,'case-'));
+  dbPath=path.join(testDirectory,'bot_data.json');
+  bot=createBot({dataDir:testDirectory,telegramQueue:{run:(_,fn)=>Promise.resolve().then(fn),idle:()=>Promise.resolve()}});
+});
+afterEach(()=>bot.closeStore());
 after(() => {
   globalThis.fetch = originalFetch;
   fs.rmSync(directory, { recursive: true, force: true });
@@ -37,7 +45,7 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-const readDb = () => JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+const readDb = () => readState({dataDir:testDirectory});
 const writeDb = db => fs.writeFileSync(dbPath, JSON.stringify(db));
 const message = (id, text, extra = {}) => ({ chat: { id, type: 'private' }, from: { id }, text, ...extra });
 

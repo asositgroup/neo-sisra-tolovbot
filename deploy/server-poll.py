@@ -34,17 +34,21 @@ BOT_BASE = Path("/opt/neo-sisra-pay-bot")
 CURRENT = BOT_BASE / "current"
 TEST_UNIT = "neo-sisra-bot-tests.service"
 DEPLOYER = "/usr/local/sbin/neo-sisra-bot-deploy"
-RUNTIME_FILES = frozenset(("bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json"))
+RUNTIME_FILES = frozenset((
+    "bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json",
+    "state-store.cjs", "work-queue.cjs", "telegram-queue.cjs",
+))
 REQUIRED = RUNTIME_FILES | frozenset((
     "deploy/server-deploy.py", "deploy/ssh-entry.sh", "deploy/tests/test_server_deploy.py",
     "deploy/server-poll.py", "deploy/tests/test_server_poll.py",
+    "deploy/export-state.cjs",
     "tests/bot-flow.test.cjs", "tests/google-delivery.test.cjs",
     "tests/shutdown.test.cjs", "tests/telegram-http.test.cjs",
 ))
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 NODE_TEST_RE = re.compile(r"tests/[A-Za-z0-9_-]+[.]test[.]cjs\Z", re.ASCII)
 MAX_COMPRESSED = 16 * 1024 * 1024
-MAX_EXPANDED = 32 * 1024 * 1024
+MAX_EXPANDED = 48 * 1024 * 1024
 MAX_FILE = 4 * 1024 * 1024
 MAX_ENTRIES = 1024
 COMMAND_ENV = {

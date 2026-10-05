@@ -153,3 +153,72 @@ test('File stream failures return safe errors and release the deadline', async (
   await assert.rejects(h.fetchBytes(secretUrl), error => assertSafe(error, 'TELEGRAM_NETWORK_ERROR'));
   assert.equal(h.jobs.size, 0);
 });
+
+test('HTTP 429 reads only safe numeric retry metadata without exposing Telegram descriptions', async () => {
+  const bytes = Buffer.from(JSON.stringify({ ok: false, error_code: 429, description: secretUrl, parameters: { retry_after: 3 } }));
+  const body = stream([bytes]);
+  const h = harness(async () => ({ ok: false, status: 429, body: body.body }));
+  await assert.rejects(h.fetchJson(secretUrl), error => {
+    assertSafe(error, 'TELEGRAM_HTTP_ERROR');
+    assert.equal(error.status, 429);
+    assert.equal(error.errorCode, 429);
+    assert.equal(error.retryAfter, 3);
+    return true;
+  });
+  assert.equal(h.jobs.size, 0);
+});
+
+test('Telegram API 429 in an HTTP 200 response uses the same safe retry metadata', async () => {
+  const h = harness(async () => ({ ok: true, status: 200, json: async () => ({ ok: false, error_code: 429, description: secretUrl, parameters: { retry_after: 2 } }) }));
+  await assert.rejects(h.fetchJson(secretUrl), error => {
+    assertSafe(error, 'TELEGRAM_HTTP_ERROR');
+    assert.equal(error.status, 200);
+    assert.equal(error.errorCode, 429);
+    assert.equal(error.retryAfter, 2);
+    return true;
+  });
+});
+
+test('rate-limit error body stalls remain subject to the full request deadline', async () => {
+  const body = stream([], { hangs: true });
+  const h = harness(async () => ({ ok: false, status: 429, body: body.body }));
+  const failure = assert.rejects(h.fetchJson(secretUrl), error => assertSafe(error, 'TELEGRAM_TIMEOUT'));
+  await flush(); h.expire(); await failure;
+  assert.ok(body.state.cancelled >= 1);
+  assert.equal(h.jobs.size, 0);
+});
+
+test('oversized or malformed 429 responses cannot trigger a retry', async () => {
+  for (const chunks of [[Buffer.alloc(65537, 65)], [Buffer.from('not-json ' + secretUrl)]]) {
+    const body = stream(chunks);
+    const h = harness(async () => ({ ok: false, status: 429, body: body.body }));
+    await assert.rejects(h.fetchJson(secretUrl), error => {
+      assertSafe(error, 'TELEGRAM_HTTP_ERROR');
+      assert.equal(error.status, 429);
+      assert.equal(error.retryAfter, undefined);
+      return true;
+    });
+    assert.equal(h.jobs.size, 0);
+  }
+});
+
+test('invalid retry_after is ignored and unrelated HTTP failures retain their status without reading bodies', async () => {
+  for (const retry_after of [0, -1, '3', Infinity, 1e308]) {
+    const h = harness(async () => ({ ok: false, status: 429, json: async () => ({ error_code: 429, parameters: { retry_after } }) }));
+    await assert.rejects(h.fetchJson(secretUrl), error => error.status === 429 && error.retryAfter === undefined);
+  }
+  const h = harness(async () => ({ ok: false, status: 503, json() { assert.fail('Do not read an unrelated error body'); } }));
+  await assert.rejects(h.fetchJson(secretUrl), error => error.status === 503 && error.retryAfter === undefined && assertSafe(error, 'TELEGRAM_HTTP_ERROR'));
+});
+
+test('successful streamed JSON is bounded and parsed inside the original deadline', async () => {
+  const ok = stream([Buffer.from('{"ok":true,"result":'), Buffer.from('[]}')]);
+  const h = harness(async () => ({ ok: true, body: ok.body }));
+  const result = await h.fetchJson(secretUrl);
+  assert.equal(result.ok, true);
+  assert.equal(result.result.length, 0);
+  const excessive = stream([Buffer.alloc(4 * 1024 * 1024 + 1, 65)]);
+  const limited = harness(async () => ({ ok: true, body: excessive.body }));
+  await assert.rejects(limited.fetchJson(secretUrl), error => assertSafe(error, 'TELEGRAM_BODY_TOO_LARGE'));
+  assert.equal(excessive.state.cancelled, 1);
+});

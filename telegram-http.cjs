@@ -25,6 +25,57 @@ function safeLabel(value) {
   return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9 _-]{0,59}$/.test(value) ? value : 'Telegram';
 }
 
+async function readJson(response, registerCancel, maxBytes, label) {
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    let cancelled = false;
+    const cancelReader = () => {
+      if (cancelled) return;
+      cancelled = true;
+      return reader.cancel();
+    };
+    registerCancel(cancelReader);
+    const chunks = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!ArrayBuffer.isView(value)) throw error('TELEGRAM_JSON_ERROR', label);
+        size += value.byteLength;
+        if (size > maxBytes) throw error('TELEGRAM_BODY_TOO_LARGE', label);
+        chunks.push(Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)));
+      }
+      try { return JSON.parse(Buffer.concat(chunks, size).toString('utf8')); }
+      catch { throw error('TELEGRAM_JSON_ERROR', label); }
+    } catch (failure) {
+      try { Promise.resolve(cancelReader()).catch(() => {}); } catch { /* Best effort. */ }
+      throw failure;
+    } finally {
+      try { reader.releaseLock(); } catch { /* Timed-out read may still be pending. */ }
+    }
+  }
+  // Some fetch-compatible adapters expose json() without a stream. The common
+  // request deadline still covers their entire parser operation.
+  try {
+    const data = await response.json();
+    if (Buffer.byteLength(JSON.stringify(data), 'utf8') > maxBytes) throw error('TELEGRAM_BODY_TOO_LARGE', label);
+    return data;
+  } catch (failure) {
+    if (failure instanceof TelegramHttpError) throw failure;
+    throw error('TELEGRAM_JSON_ERROR', label);
+  }
+}
+
+function httpFailure(label, status, data) {
+  const failure = error('TELEGRAM_HTTP_ERROR', label);
+  if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
+  if (data?.error_code === 429) failure.errorCode = 429;
+  const seconds = data?.parameters?.retry_after;
+  if ((status === 429 || data?.error_code === 429) && Number.isFinite(seconds) && seconds > 0 && Number.isFinite(seconds * 1000)) failure.retryAfter = seconds;
+  return failure;
+}
+
 async function request(url, options, timeoutMs, label, consume) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw error('TELEGRAM_INVALID_OPTIONS', label);
   const controller = new AbortController();
@@ -47,7 +98,15 @@ async function request(url, options, timeoutMs, label, consume) {
       const response = await fetch(url, { ...options, signal: controller.signal });
       cancelBody = () => response?.body?.cancel?.();
       if (expired) { cancel(); throw error('TELEGRAM_TIMEOUT', label); }
-      if (response?.ok !== true) throw error('TELEGRAM_HTTP_ERROR', label);
+      if (response?.ok !== true) {
+        if (response?.status === 429) {
+          let data;
+          try { data = await readJson(response, cancellation => { cancelBody = cancellation; }, 64 * 1024, label); }
+          catch { /* A malformed rate-limit response is not safe to retry. */ }
+          throw httpFailure(label, 429, data);
+        }
+        throw httpFailure(label, response?.status);
+      }
       return consume(response, cancellation => { cancelBody = cancellation; });
     })();
     return await Promise.race([operation, deadline]);
@@ -63,12 +122,10 @@ async function request(url, options, timeoutMs, label, consume) {
 
 async function fetchJson(url, options = {}, timeoutMs = 15000, label = 'Telegram') {
   const operationLabel = safeLabel(label);
-  return request(url, options, timeoutMs, operationLabel, async response => {
-    try {
-      return await response.json();
-    } catch {
-      throw error('TELEGRAM_JSON_ERROR', operationLabel);
-    }
+  return request(url, options, timeoutMs, operationLabel, async (response, registerCancel) => {
+    const data = await readJson(response, registerCancel, 4 * 1024 * 1024, operationLabel);
+    if (data?.ok === false && data.error_code === 429) throw httpFailure(operationLabel, response.status, data);
+    return data;
   });
 }
 
@@ -107,4 +164,4 @@ async function fetchBytes(url, options = {}, timeoutMs = 30000, maxBytes = 10 * 
   });
 }
 
-module.exports = { fetchJson, fetchBytes };
+module.exports = { fetchJson, fetchBytes, TelegramHttpError };

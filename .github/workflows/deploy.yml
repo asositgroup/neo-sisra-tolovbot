@@ -41,7 +41,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Package runtime files
-        run: tar --format=ustar -czf release.tar.gz bot.js google-delivery.cjs telegram-http.cjs package.json
+        run: tar --format=ustar -czf release.tar.gz bot.js google-delivery.cjs telegram-http.cjs state-store.cjs work-queue.cjs telegram-queue.cjs package.json
       - name: Deploy and verify bot readiness
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

@@ -49,6 +49,29 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(poller.PollError):
             poller.snapshot_files(archive(list(FILES.items())[1:]), SHA)
 
+    def test_snapshot_requires_every_scalable_runtime_module(self):
+        for name in ("state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"):
+            with self.subTest(name=name), self.assertRaises(poller.PollError):
+                entries = [(path, content) for path, content in FILES.items() if path != name]
+                poller.snapshot_files(archive(entries), SHA)
+
+    def test_new_offline_test_files_are_included_without_adding_to_allowlist(self):
+        new_tests = {
+            "tests/state-store.test.cjs": b"SQLite tests",
+            "tests/work-queue.test.cjs": b"ordering tests",
+            "tests/telegram-queue.test.cjs": b"rate limit tests",
+        }
+        selected = poller.snapshot_files(archive(list(FILES.items()) + list(new_tests.items())), SHA)
+        for name, content in new_tests.items():
+            self.assertEqual(selected[name], content)
+
+    def test_operator_exporter_is_not_shipped_in_runtime_archive(self):
+        encoded = poller.release_archive(FILES)
+        with tarfile.open(fileobj=io.BytesIO(encoded), mode="r:gz") as result:
+            names = set(result.getnames())
+        self.assertNotIn("deploy/export-state.cjs", names)
+        self.assertTrue({"state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"}.issubset(names))
+
     def test_unsafe_paths_and_duplicate_entries_rejected(self):
         for name in ("../bot.js", "tests/../../escape", "tests//bad", "tests/./bad", "back\\slash", "bot.js"):
             with self.subTest(name=name), self.assertRaises(poller.PollError):

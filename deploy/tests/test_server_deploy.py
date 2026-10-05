@@ -23,12 +23,17 @@ SCRIPT = Path(__file__).resolve().parents[1] / "server-deploy.py"
 SPEC = importlib.util.spec_from_file_location("server_deploy", SCRIPT)
 deploy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deploy)
-PAYLOAD = {
+LEGACY_PAYLOAD = {
     "bot.js": b"console.log('test');\n",
     "google-delivery.cjs": b"module.exports = {};\n",
     "telegram-http.cjs": b"module.exports = {};\n",
     "package.json": b'{"name":"offline-fixture","private":true}\n',
 }
+PAYLOAD = dict(LEGACY_PAYLOAD, **{
+    "state-store.cjs": b"module.exports = {};\n",
+    "work-queue.cjs": b"module.exports = {};\n",
+    "telegram-queue.cjs": b"module.exports = {};\n",
+})
 
 
 def raw_tar(entries=None):
@@ -69,6 +74,20 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual((self.staging / name).read_bytes(), content)
             self.assertEqual(result[name], hashlib.sha256(content).hexdigest())
             self.assertEqual(stat.S_IMODE((self.staging / name).stat().st_mode), 0o644)
+
+    def test_complete_legacy_archive_remains_supported(self):
+        result = deploy.extract_archive(archive(LEGACY_PAYLOAD.items()), self.staging)
+        self.assertEqual(set(result), deploy.LEGACY_FILES)
+
+    def test_partial_new_runtime_is_rejected(self):
+        for extras in (("state-store.cjs",), ("state-store.cjs", "work-queue.cjs")):
+            with self.subTest(extras=extras), tempfile.TemporaryDirectory() as directory:
+                entries = list(LEGACY_PAYLOAD.items()) + [(name, PAYLOAD[name]) for name in extras]
+                with self.assertRaises(deploy.DeploymentError):
+                    deploy.extract_archive(archive(entries), Path(directory))
+
+    def test_new_modules_cannot_replace_a_required_legacy_file(self):
+        self.reject([(name, content) for name, content in PAYLOAD.items() if name != "bot.js"])
 
     def test_unsafe_names_and_extra_entries(self):
         for name in ("../bot.js", "/bot.js", "./bot.js", "nested/bot.js", ".env", "data", "unit.service"):
@@ -158,15 +177,38 @@ class PackageAndCommandTests(unittest.TestCase):
 
     def test_syntax_checks_run_as_runtime_user(self):
         with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
-            deploy.validate_javascript(Path("/fixture"))
-        self.assertEqual(command.call_count, 3)
+            deploy.validate_javascript(Path("/fixture"), deploy.FILES)
+        self.assertEqual(command.call_count, 6)
         for call in command.call_args_list:
             self.assertEqual(call.args[0][:6], ["/usr/sbin/runuser", "-u", "neo-sisra-bot", "--", "/usr/bin/node", "--check"])
+
+    def test_legacy_syntax_checks_do_not_require_new_modules(self):
+        with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
+            deploy.validate_javascript(Path("/fixture"), deploy.LEGACY_FILES)
+        self.assertEqual(command.call_count, 3)
 
     def test_syntax_failure_rejected(self):
         with patch.object(deploy, "command", return_value=Mock(returncode=1)):
             with self.assertRaises(deploy.DeploymentError):
-                deploy.validate_javascript(Path("/fixture"))
+                deploy.validate_javascript(Path("/fixture"), deploy.FILES)
+
+    def test_stop_requires_confirmed_inactive_service(self):
+        with patch.object(deploy, "command", side_effect=[Mock(returncode=0), Mock(returncode=0, stdout=b"inactive\n")]) as command:
+            deploy.stop_service()
+        self.assertEqual(command.call_args_list[0].args[0], ["/usr/bin/systemctl", "stop", deploy.UNIT])
+        self.assertIn("--property=ActiveState", command.call_args_list[1].args[0])
+
+    def test_stop_command_failure_is_closed(self):
+        with patch.object(deploy, "command", return_value=Mock(returncode=1)) as command:
+            with self.assertRaises(deploy.DeploymentError):
+                deploy.stop_service()
+        self.assertEqual(command.call_count, 1)
+
+    def test_stop_does_not_accept_still_running_or_unknown_state(self):
+        for state in (b"active\n", b"activating\n", b"deactivating\n", b"", b"failed\ninactive\n"):
+            with self.subTest(state=state), patch.object(deploy, "command", side_effect=[Mock(returncode=0), Mock(returncode=0, stdout=state)]):
+                with self.assertRaises(deploy.DeploymentError):
+                    deploy.stop_service()
 
     def test_subprocess_has_fixed_environment_no_inherited_node_options(self):
         with patch.object(deploy.subprocess, "run", return_value=Mock(returncode=0)) as run:
@@ -247,10 +289,12 @@ class TransactionTests(unittest.TestCase):
             patch.object(deploy, "wait_ready"),
             patch.object(deploy, "service_active", return_value=True),
             patch.object(deploy.signal, "signal"),
+            patch.object(deploy, "stop_service"),
         ]
         self.mocks = [item.start() for item in self.patches]
         self.restart = self.mocks[5]
         self.ready = self.mocks[6]
+        self.stop = self.mocks[-1]
 
     def tearDown(self):
         for item in reversed(self.patches):
@@ -271,6 +315,132 @@ class TransactionTests(unittest.TestCase):
         for name in deploy.STATE_NAMES:
             self.assertEqual(os.readlink(self.target / name), str(self.base / name))
         self.assert_state_preserved()
+
+    def make_previous_legacy(self):
+        for name in deploy.FILES - deploy.LEGACY_FILES:
+            (self.previous / name).unlink()
+
+    def create_sqlite_marker(self):
+        (self.base / "data" / deploy.SQLITE_NAME).write_bytes(b"offline SQLite marker")
+
+    def test_new_runtime_can_deploy_with_legacy_fallback(self):
+        self.make_previous_legacy()
+        deploy.deploy("b" * 40, archive())
+        self.assertEqual(self.current.resolve(), self.target)
+        self.stop.assert_not_called()
+        self.assert_state_preserved()
+
+    def test_partial_existing_release_is_rejected_before_restart(self):
+        (self.previous / "work-queue.cjs").unlink()
+        with self.assertRaisesRegex(deploy.DeploymentError, "incomplete runtime"):
+            deploy.deploy("b" * 40, archive())
+        self.restart.assert_not_called()
+
+    def test_same_sha_cannot_change_legacy_to_new_runtime(self):
+        self.make_previous_legacy()
+        with self.assertRaisesRegex(deploy.DeploymentError, "does not match"):
+            deploy.deploy("a" * 40, archive())
+        self.restart.assert_not_called()
+        self.assertEqual(self.current.resolve(), self.previous)
+
+    def test_legacy_rollback_stops_then_exports_before_switch_and_restart(self):
+        self.make_previous_legacy()
+        self.create_sqlite_marker()
+        events = []
+        self.stop.side_effect = lambda: events.append("stop")
+        self.restart.side_effect = lambda: events.append("restart")
+        self.ready.side_effect = [deploy.DeploymentError("fixture failure"), None]
+        original_switch = deploy.switch_current
+
+        def switch(release):
+            events.append("switch-legacy" if release == self.previous else "switch-new")
+            original_switch(release)
+
+        def export(arguments, **_kwargs):
+            self.assertEqual(self.current.resolve(), self.target)
+            self.assertEqual(arguments, ["/usr/sbin/runuser", "-u", deploy.RUNTIME_USER, "--", "/usr/bin/node", str(deploy.EXPORT_WRAPPER)])
+            events.append("export")
+            return Mock(returncode=0)
+
+        with patch.object(deploy, "command", side_effect=export), patch.object(deploy, "switch_current", side_effect=switch):
+            with self.assertRaisesRegex(deploy.DeploymentError, "previous release restored"):
+                deploy.deploy("b" * 40, archive())
+        self.assertEqual(events, ["switch-new", "restart", "stop", "export", "switch-legacy", "restart"])
+        self.assertEqual(self.current.resolve(), self.previous)
+        self.assert_state_preserved()
+
+    def test_failed_export_never_selects_or_starts_stale_legacy_fallback(self):
+        self.make_previous_legacy()
+        self.create_sqlite_marker()
+        self.ready.side_effect = deploy.DeploymentError("fixture failure")
+        with patch.object(deploy, "command", return_value=Mock(returncode=1)):
+            with self.assertRaisesRegex(deploy.DeploymentError, "operator recovery required"):
+                deploy.deploy("b" * 40, archive())
+        self.stop.assert_called_once()
+        self.restart.assert_called_once()
+        self.assertEqual(self.current.resolve(), self.target)
+        self.assert_state_preserved()
+
+    def test_rollback_without_sqlite_still_stops_before_legacy_activation(self):
+        self.make_previous_legacy()
+        self.ready.side_effect = [deploy.DeploymentError("fixture failure"), None]
+        with patch.object(deploy, "command") as command:
+            with self.assertRaisesRegex(deploy.DeploymentError, "previous release restored"):
+                deploy.deploy("b" * 40, archive())
+        self.stop.assert_called_once()
+        command.assert_not_called()
+        self.assertEqual(self.current.resolve(), self.previous)
+
+    def test_manual_legacy_deploy_exports_current_sqlite_before_start(self):
+        self.create_sqlite_marker()
+        with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
+            deploy.deploy("b" * 40, archive(LEGACY_PAYLOAD.items()))
+        self.stop.assert_called_once()
+        command.assert_called_once()
+        self.assertEqual(self.current.resolve(), self.target)
+        self.assertEqual(deploy.release_files(self.target), deploy.LEGACY_FILES)
+
+    def test_sqlite_created_during_stop_is_also_exported(self):
+        self.stop.side_effect = self.create_sqlite_marker
+        with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
+            deploy.deploy("b" * 40, archive(LEGACY_PAYLOAD.items()))
+        command.assert_called_once()
+
+    def test_legacy_export_rejects_symlink_sqlite(self):
+        self.make_previous_legacy()
+        (self.base / "data" / deploy.SQLITE_NAME).symlink_to(self.base / "data" / "state.json")
+        with patch.object(deploy, "command") as command:
+            with self.assertRaisesRegex(deploy.DeploymentError, "regular file"):
+                deploy.prepare_activation(self.previous)
+        command.assert_not_called()
+        self.stop.assert_called_once()
+
+    def test_export_requires_both_operator_installed_files(self):
+        self.make_previous_legacy()
+        self.create_sqlite_marker()
+        with patch.object(deploy, "check_code_file") as checked, patch.object(deploy, "command", return_value=Mock(returncode=0)):
+            deploy.prepare_activation(self.previous)
+        self.assertEqual([call.args[0] for call in checked.call_args_list], [deploy.EXPORT_WRAPPER, deploy.EXPORT_MODULE])
+
+    def test_unsafe_operator_exporter_is_rejected_without_execution(self):
+        self.make_previous_legacy()
+        self.create_sqlite_marker()
+        with patch.object(deploy, "check_code_file", side_effect=deploy.DeploymentError("unsafe exporter")), patch.object(deploy, "command") as command:
+            with self.assertRaisesRegex(deploy.DeploymentError, "unsafe exporter"):
+                deploy.prepare_activation(self.previous)
+        command.assert_not_called()
+
+    def test_failed_stop_never_exports_or_starts_legacy_fallback(self):
+        self.make_previous_legacy()
+        self.create_sqlite_marker()
+        self.ready.side_effect = deploy.DeploymentError("fixture failure")
+        self.stop.side_effect = deploy.DeploymentError("could not stop")
+        with patch.object(deploy, "command") as command:
+            with self.assertRaisesRegex(deploy.DeploymentError, "operator recovery required"):
+                deploy.deploy("b" * 40, archive())
+        command.assert_not_called()
+        self.restart.assert_called_once()
+        self.assertEqual(self.current.resolve(), self.target)
 
     def test_invalid_archive_never_restarts_or_changes_current(self):
         with self.assertRaises(deploy.DeploymentError):

@@ -8,7 +8,7 @@ unset NODE_OPTIONS NODE_PATH PYTHONPATH PYTHONHOME
 [ "$(id -u)" -ne 0 ]
 [ ! -r /opt/neo-sisra-pay-bot/.env ]
 [ ! -w . ]
-for source in bot.js google-delivery.cjs telegram-http.cjs; do
+for source in bot.js google-delivery.cjs telegram-http.cjs state-store.cjs work-queue.cjs telegram-queue.cjs deploy/export-state.cjs; do
     /usr/bin/node --check "$source"
 done
 /usr/bin/node --test tests/*.test.cjs

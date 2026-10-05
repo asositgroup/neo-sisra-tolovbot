@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
 
 const BASE_DIR = __dirname;
 
@@ -19,10 +20,9 @@ function loadEnv() {
 
 loadEnv();
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(BASE_DIR, 'data'));
-const DB_PATH = path.join(DATA_DIR, 'bot_data.json');
+function createBot(options = {}) {
+const DATA_DIR = path.resolve(options.dataDir || process.env.DATA_DIR || path.join(BASE_DIR, 'data'));
 const EXPORT_PATH = path.join(DATA_DIR, 'neo-sisra-pay-export.xls');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || '').trim();
 const GOOGLE_SCRIPT_URL = (process.env.GOOGLE_SCRIPT_URL || '').trim();
@@ -38,7 +38,33 @@ const EXTRA_ADMIN_IDS = splitCsv(process.env.EXTRA_ADMIN_IDS);
 const ADMIN_IDS = [...new Set([...PRIMARY_ADMIN_IDS, ...EXTRA_ADMIN_IDS])];
 const { createGoogleDelivery, validateReceipt } = require('./google-delivery.cjs');
 const { fetchJson, fetchBytes } = require('./telegram-http.cjs');
-const google = createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
+const { createStateStore } = require('./state-store.cjs');
+const { createWorkQueue } = require('./work-queue.cjs');
+const { createTelegramQueue } = require('./telegram-queue.cjs');
+function setting(name, fallback, maximum) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isInteger(value) || value < 1 || value > maximum) throw new Error(name+' notoʻgʻri sozlangan.');
+  return value;
+}
+const updateWorkers = options.updateWorkers || setting('UPDATE_WORKERS', 32, 64);
+const deliveryWorkers = options.deliveryWorkers || setting('DELIVERY_WORKERS', 4, 10);
+const deliveryQueue = createWorkQueue({ concurrency: deliveryWorkers, maxPending: deliveryWorkers });
+const telegramQueue = options.telegramQueue || createTelegramQueue({
+  ratePerSecond: setting('TELEGRAM_MESSAGES_PER_SECOND', 25, 30),
+  perChatMs: 1050, groupMs: 3100, concurrency: 8, maxPending: 500,
+});
+const google = options.google || createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
+let store = options.stateStore;
+let storageFailure;
+let backgroundStopping = false;
+function storage() { return store ||= createStateStore({ dataDir: DATA_DIR, emptyDb }); }
+function storageAction(fn) {
+  if (storageFailure) throw storageFailure;
+  try { return fn(); } catch (error) {
+    storageFailure = Object.assign(new Error('Bot maʼlumotlarini saqlashda xatolik.'), { code: 'STATE_STORE_ERROR', cause: error });
+    throw storageFailure;
+  }
+}
 const WELCOME_IMAGE_PATH = process.env.WELCOME_IMAGE_PATH ? path.resolve(BASE_DIR, process.env.WELCOME_IMAGE_PATH) : '';
 const OFFER_DOC_PATH = process.env.OFFER_DOC_PATH ? path.resolve(BASE_DIR, process.env.OFFER_DOC_PATH) : '';
 const OFFER_VERSION = process.env.OFFER_VERSION || 'pending-2026-10-04';
@@ -64,6 +90,7 @@ const WELCOME_BUTTONS = ["💳 To'lov qilish uchun ro'yxatdan o'tish"];
 const pendingTasks = new Set();
 const registrationFlights = new Set();
 const paymentFlights = new Set();
+const queuedDeliveries = new Set();
 function safeError(error) {
   return String(error?.message || error || 'Xatolik').replace(/https?:\/\/api\.telegram\.org\/[^\s"']+/g, '[Telegram API]').replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g, '[TOKEN]');
 }
@@ -84,23 +111,16 @@ function emptyDb() {
     payments: [],
     admin_chat_ids: [],
     last_update_id: 0,
+    completed_update_ids: [],
   };
 }
 
 function loadDb() {
-  if (!fs.existsSync(DB_PATH)) return emptyDb();
-  try {
-    const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-    return { ...emptyDb(), ...data };
-  } catch {
-    throw new Error('Bot maʼlumotlarini oʻqib boʻlmadi. Saqlangan faylni tekshiring.');
-  }
+  return storageAction(() => storage().load());
 }
 
 function saveDb(db) {
-  const tmp = `${DB_PATH}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8');
-  fs.renameSync(tmp, DB_PATH);
+  return storageAction(() => storage().save(db));
 }
 
 function pad(value) {
@@ -112,8 +132,9 @@ function nowParts() {
   return {full:parts.day+'.'+parts.month+'.'+parts.year+' '+parts.hour+':'+parts.minute+':'+parts.second,date:parts.year+'-'+parts.month+'-'+parts.day,time:parts.hour+':'+parts.minute+':'+parts.second};
 }
 
-async function tg(method, data = {}) {
+async function tg(method, data = {}, priority = 0) {
   if (!BOT_TOKEN) throw new Error('BOT_TOKEN .env faylida yoq');
+  return telegramQueue.run({chatId: data.chat_id, priority, rateLimited: !['getMe','getFile','answerCallbackQuery'].includes(method)}, async () => {
   const payload = await fetchJson(
     `${API}/${method}`,
     {
@@ -126,9 +147,11 @@ async function tg(method, data = {}) {
   );
   if (!payload.ok) throw new Error('Telegram soʻrovi bajarilmadi (kod '+Number(payload.error_code||0)+').');
   return payload.result;
+  });
 }
 
 async function tgMultipart(method, form) {
+  return telegramQueue.run({chatId: form.get('chat_id')}, async () => {
   const payload = await fetchJson(
     `${API}/${method}`,
     { method: 'POST', body: form },
@@ -137,6 +160,7 @@ async function tgMultipart(method, form) {
   );
   if (!payload.ok) throw new Error('Telegram fayl soʻrovi bajarilmadi (kod '+Number(payload.error_code||0)+').');
   return payload.result;
+  });
 }
 
 function keyboard(rows, oneTime = false) {
@@ -229,7 +253,7 @@ function registeredChatIds(db) {
 }
 
 function newItemId() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  return randomUUID();
 }
 
 function itemPreview(message) {
@@ -335,7 +359,7 @@ async function addBroadcastItem(db, message) {
     { inline_keyboard: assetButtons(item.id, n - 1, n) },
     { reply_to_message_id: message.message_id },
   );
-  item.controlMessageId = ctrl.message_id;
+  b.items[n - 1].controlMessageId = ctrl.message_id;
   await refreshAssetControls(db, chatId);
 }
 
@@ -343,21 +367,48 @@ function runInBackground(label, fn) {
   const task=Promise.resolve().then(fn).catch(err=>console.error(label+': '+safeError(err))).finally(()=>pendingTasks.delete(task));
   pendingTasks.add(task);
 }
+// Rows enter the durable outbox before any network work. Only a fixed number
+// are materialized as promises; the rest stay pending in SQLite.
+function pumpDeliveries(db) {
+  if (backgroundStopping || storageFailure) return;
+  const room = deliveryWorkers - queuedDeliveries.size;
+  if (room <= 0) return;
+  const jobs = storageAction(() => storage().pendingDeliveries(room, queuedDeliveries));
+  for (const { collection, row } of jobs) {
+    const key = collection + ':' + row.id;
+    queuedDeliveries.add(key);
+    runInBackground('Delivery', async () => {
+      try {
+        await deliveryQueue.run(key, () => collection === 'payments' ? deliverPayment(db, row) : deliverRegistration(db, row));
+      } finally {
+        queuedDeliveries.delete(key);
+        // Let the queue release its active slot before filling it again.
+        setImmediate(() => { try { pumpDeliveries(db); } catch (error) { console.error(safeError(error)); } });
+      }
+    });
+  }
+}
+function claimDelivery(db, collection, row) {
+  saveDb(db);
+  return storageAction(() => storage().claimDelivery(collection, row.id, ['pending']));
+}
 function newRegistration(db, profile) {
   const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
   db.registrations.push(row);
   saveDb(db);
-  return row;
+  return db.registrations.at(-1);
 }
 async function deliverRegistration(db,row) {
   if(row.status==='sent' || registrationFlights.has(row.id)) return;
+  if (!claimDelivery(db, 'registrations', row)) return;
   registrationFlights.add(row.id);
   try {
-    row.status='sending'; saveDb(db);
     await google.sendRegistration(profileFor(row));
     row.status='sent'; row.google_result={ok:true};
   } catch(error) {
+    if (error.code === 'STATE_STORE_ERROR') throw error;
     row.status='failed'; row.google_result={ok:false,error:'Sheets yuborish tasdiqlanmadi'};
+    saveDb(db);
     console.error('Registration: '+safeError(error));
     try { await sendMessage(row.telegram_id,'Maʼlumotlaringiz saqlandi, lekin jadvalga yetkazilgani tasdiqlanmadi. 🔄 Qayta yuborish tugmasini bosishingiz mumkin.',retryKeyboard()); } catch(error) { console.error(safeError(error)); }
   } finally { saveDb(db); registrationFlights.delete(row.id); }
@@ -385,15 +436,16 @@ async function downloadReceipt(receipt) {
 }
 async function deliverPayment(db,row) {
   if(row.status==='sent' || paymentFlights.has(row.id)) return;
+  if (!claimDelivery(db, 'payments', row)) return;
   paymentFlights.add(row.id);
   try {
-    row.status='sending'; saveDb(db);
     const file=await downloadReceipt(row.receipt);
     const result=await google.sendReceipt(profileFor(row),file);
     row.check_url=result.fileUrl; row.check_url_google=result.fileUrl;
     row.google_result={ok:true,fileUrl:result.fileUrl}; row.status='sent';
     saveDb(db);
   } catch(error) {
+    if (error.code === 'STATE_STORE_ERROR') throw error;
     row.status=error.code==='INVALID_RECEIPT'?'invalid':'failed'; row.google_result={ok:false,error:'Chek yetkazilgani tasdiqlanmadi'};
     saveDb(db);
     console.error('Receipt: '+safeError(error));
@@ -500,6 +552,7 @@ async function startRegistration(db, chatId, message) {
     username: message.from?.username || '',
     step: 'name',
   };
+  saveDb(db);
   await sendHtml(chatId,'<b>Neo Sisra</b>\nKoreyada oʻqish va oʻqish davrida rasmiy ishlash imkoniyatlari.\nKoreyaga talaba yuborish va hujjatlarni rasmiylashtirish xizmati.\n\n<b>50 kishi uchun maxsus taklif</b>');
   if(WELCOME_IMAGE_PATH && fs.existsSync(WELCOME_IMAGE_PATH)) await sendPhoto(chatId,WELCOME_IMAGE_PATH);
   await askName(chatId);
@@ -516,72 +569,75 @@ async function adminPanel(chatId) {
   await sendMessage(chatId, "Admin bo'limi", adminKeyboard());
 }
 
-async function copyOne(chatId, fromChatId, messageId) {
-  try {
-    await tg('copyMessage', {
-      chat_id: chatId,
-      from_chat_id: fromChatId,
-      message_id: messageId,
-    });
-    return true;
-  } catch (err) {
-    const raw = String(err.message || '');
-    if (raw.includes('429')) {
-      await sleep(3000);
-      try {
-        await tg('copyMessage', {
-          chat_id: chatId,
-          from_chat_id: fromChatId,
-          message_id: messageId,
-        });
-        return true;
-      } catch {
-        return false;
+let broadcastFlight = false;
+function startBroadcastWorker(db) {
+  if (broadcastFlight || backgroundStopping || db.broadcast_job?.status !== 'running') return;
+  broadcastFlight = true;
+  runInBackground('Broadcast', async () => {
+    const job = db.broadcast_job;
+    try {
+      while (!backgroundStopping && job.status === 'running' && job.recipient < db.broadcast_recipients.length) {
+        const chatId = db.broadcast_recipients[job.recipient];
+        const item = job.items[job.item];
+        // Persist the cursor before Telegram: a lost acknowledgement is not
+        // automatically resent after restart. The uncertainty stays visible.
+        job.in_flight = true;
+        job.item++;
+        if (job.item >= job.items.length) { job.item = 0; job.recipient++; }
+        saveDb(db);
+        try {
+          await tg('copyMessage', { chat_id: chatId, from_chat_id: job.fromChatId, message_id: item.srcMessageId }, 10);
+          job.sent++;
+        } catch (error) {
+          job.failed++;
+          console.error('Broadcast delivery: '+safeError(error));
+        }
+        job.in_flight = false;
+        saveDb(db);
       }
-    }
-    return false;
-  }
+      if (job.status === 'running') job.status = job.recipient >= db.broadcast_recipients.length ? 'done' : 'interrupted';
+      saveDb(db);
+      if (job.status === 'done') await sendMessage(job.fromChatId,
+        'Yuborish yakunlandi. Yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+job.failed+'.', adminKeyboard());
+    } finally { broadcastFlight = false; }
+  });
 }
-
 async function runBroadcast(db, adminChatId) {
-  const b = db.broadcast || {};
-  const items = Array.isArray(b.items) ? b.items.slice() : [];
-  const fromChatId = b.fromChatId;
-  const ids = registeredChatIds(db).filter((id) => id !== adminChatId);
-  clearBroadcast(db);
-  if (!fromChatId || !items.length) {
-    await sendMessage(adminChatId, "Yuborish uchun material yo'q.", adminKeyboard());
+  if (broadcastFlight || (db.broadcast_job && ['running','interrupted'].includes(db.broadcast_job.status))) {
+    await sendMessage(adminChatId,'Oldingi yuborish hali yakunlanmagan. /broadcast_status orqali tekshiring.');
     return;
   }
-  await sendMessage(
-    adminChatId,
-    `${ids.length} ta foydalanuvchiga ${items.length} ta material yuborilmoqda...`,
-    adminKeyboard(),
-  );
-  let ok = 0;
-  let fail = 0;
-  for (const id of ids) {
-    let delivered = 0;
-    for (const item of items) {
-      const sent = await copyOne(id, fromChatId, item.srcMessageId);
-      if (!sent) break;
-      delivered += 1;
-      await sleep(35);
-    }
-    if (delivered === items.length) ok += 1;
-    else fail += 1;
-    await sleep(40);
+  const b = db.broadcast;
+  if (!b?.fromChatId || !b.items?.length) {
+    await sendMessage(adminChatId,'Yuborish uchun material yoʻq.',adminKeyboard());
+    return;
   }
-  await sendMessage(
-    adminChatId,
-    `Tayyor.\nYuborildi: ${ok}\nYetib bormadi: ${fail} (bloklagan yoki /start bosmagan)`,
-    adminKeyboard(),
-  );
+  db.broadcast_recipients = registeredChatIds(db).filter(id => id !== adminChatId);
+  db.broadcast_job = { id: newItemId(), status: 'running', fromChatId: b.fromChatId,
+    items: b.items.map(item => ({srcMessageId:item.srcMessageId})), recipient: 0, item: 0,
+    sent: 0, failed: 0, in_flight: false };
+  clearBroadcast(db);
+  saveDb(db);
+  startBroadcastWorker(db);
+  await sendMessage(adminChatId,db.broadcast_recipients.length+' ta foydalanuvchiga xabarlar navbat bilan yuboriladi. Holat: /broadcast_status',adminKeyboard());
 }
 
 async function handleAdmin(message, db) {
   const chatId = message.chat.id;
   const text = (message.text || '').trim();
+  if (['/broadcast_status','/broadcast_resume','/broadcast_cancel'].includes(text)) {
+    const job = db.broadcast_job;
+    if (!job) { await sendMessage(chatId,'Faol yuborish yoʻq.'); return true; }
+    if (text !== '/broadcast_status' && job.fromChatId !== chatId) {
+      await sendMessage(chatId,'Bu yuborishni uni boshlagan admin boshqaradi.'); return true;
+    }
+    if (text === '/broadcast_cancel') job.status = 'cancelled';
+    if (text === '/broadcast_resume' && job.status === 'interrupted') job.status = 'running';
+    saveDb(db);
+    startBroadcastWorker(db);
+    await sendMessage(chatId,'Holat: '+job.status+'; yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+job.failed+'.',adminKeyboard());
+    return true;
+  }
   const b = db.broadcast;
   const collecting = Boolean(b && b.step === 'collecting' && b.fromChatId === chatId);
 
@@ -680,8 +736,8 @@ async function handleOfferCallback(cb,db) {
     await askOffer(chatId);return;
   }
   profile.offerAccepted=true;profile.offerVersion=OFFER_VERSION;profile.tariff=SERVICE_NAME;profile.step='receipt';
-  const row=newRegistration(db,profile);
-  runInBackground('registration',()=>deliverRegistration(db,row));
+  newRegistration(db,profile);
+  pumpDeliveries(db);
   await answerCb(cb.id,'Roziligingiz qabul qilindi');
   await sendHtml(chatId,paymentText(profile),removeKeyboard());
 }
@@ -834,17 +890,19 @@ async function handleMessage(message,db) {
   const profile=db.users[userKey(chatId)];
   if(!profile) {await startRegistration(db,chatId,message);return;}
   if(text==='🔄 Qayta yuborish' || text==='/retry') {
-    const rows=[...db.registrations,...db.payments].filter(row=>row.telegram_id===chatId && ['pending','sending','failed'].includes(row.status));
+    const rows=[...db.registrations,...db.payments].filter(row=>row.telegram_id===chatId && ['pending','failed'].includes(row.status));
     if(!rows.length) {await sendMessage(chatId,'Qayta yuboriladigan maʼlumot yoʻq.');return;}
+    for (const row of rows) if (row.status === 'failed') row.status = 'pending';
+    saveDb(db);
+    pumpDeliveries(db);
     await sendMessage(chatId,'Qayta yuborish boshlandi. Natija shu yerda chiqadi.');
-    for(const row of rows)runInBackground('retry',()=>row.receipt?deliverPayment(db,row):deliverRegistration(db,row));
     return;
   }
   if(text==='📋 Holat' || text==='/status') {
     const row=[...db.payments].reverse().find(row=>row.telegram_id===chatId);
     const registration=[...db.registrations].reverse().find(item=>item.telegram_id===chatId);
-    if(!row && registration && registration.status!=='sent') {await sendMessage(chatId,registration.status==='sending'?'Maʼlumotlaringiz jadvalga yuborilyapti.':'Maʼlumotlaringiz jadvalga yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.',retryKeyboard());return;}
-    await sendMessage(chatId,row?(row.status==='sent'?'Chekingiz tekshirish uchun yuborilgan. Toʻlov natijasi boʻyicha siz bilan bogʻlanamiz.':row.status==='sending'?'Chekingiz yuborilyapti. Natija shu yerda chiqadi.':'Chek yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.'):'Hali chek yubormagansiz.',row && row.status!=='sent'?retryKeyboard():undefined);return;
+    if(!row && registration && registration.status!=='sent') {await sendMessage(chatId,['pending','sending'].includes(registration.status)?'Maʼlumotlaringiz jadvalga yuborilyapti.':'Maʼlumotlaringiz jadvalga yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.',retryKeyboard());return;}
+    await sendMessage(chatId,row?(row.status==='sent'?'Chekingiz tekshirish uchun yuborilgan. Toʻlov natijasi boʻyicha siz bilan bogʻlanamiz.':['pending','sending'].includes(row.status)?'Chekingiz yuborilyapti. Natija shu yerda chiqadi.':'Chek yetkazilgani tasdiqlanmadi. Qayta yuborishingiz mumkin.'):'Hali chek yubormagansiz.',row && row.status!=='sent'?retryKeyboard():undefined);return;
   }
   if(profile.step==='name') {
     if(!isPlainNameText(message)||!text||/[\u0000-\u001f\u007f]/.test(text)) {await askName(chatId);return;}
@@ -862,124 +920,166 @@ async function handleMessage(message,db) {
     if(!profile.offerAccepted || profile.offerVersion!==OFFER_VERSION) {profile.step='offer';saveDb(db);await askOffer(chatId);return;}
     const receipt=extractReceipt(message);
     if(!receipt||receipt.fileSize>10*1024*1024) {await sendMessage(chatId,'Toʻlov chekini PNG, JPG yoki PDF qilib yuboring. Hajmi 10 MB dan oshmasin.');return;}
-    const existing=db.payments.find(row=>row.telegram_id===chatId && row.name===profile.name && row.phone===profile.phone && row.offer_version===profile.offerVersion && row.receipt?.uniqueId===receipt.uniqueId);
+    const existing=storageAction(() => storage().findReceipt({telegram_id:chatId,name:profile.name,phone:profile.phone,offer_version:profile.offerVersion,receipt}));
     if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?undefined:retryKeyboard());return;}
     const parts=nowParts();
     const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
     db.payments.push(row);profile.step='done';saveDb(db);
-    runInBackground('payment',()=>deliverPayment(db,row));
+    pumpDeliveries(db);
     await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.\n\n'+contactText(),keyboard([['📋 Holat']]));return;
   }
 }
 function recoverInterrupted(db) {
-  for(const row of [...db.registrations,...db.payments])if(['sending','pending'].includes(row.status))row.status='failed';
+  for(const row of [...db.registrations,...db.payments])if(row.status==='sending')row.status='failed';
+  if (db.broadcast_job?.status === 'running') {
+    db.broadcast_job.status = 'interrupted';
+    if (db.broadcast_job.in_flight) { db.broadcast_job.failed++; db.broadcast_job.in_flight = false; }
+  }
   return db;
 }
 
-function createPollingRuntime({ shutdownTimeoutMs = 240000, onShutdownTimeout = () => process.exit(1) } = {}) {
+async function waitForBackground() {
+  do {
+    if (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
+    await new Promise(resolve => setImmediate(resolve));
+    if (storageFailure) throw storageFailure;
+  } while (pendingTasks.size || queuedDeliveries.size);
+}
+function closeStore() { if (store) { store.close(); store = null; } }
+function createPollingRuntime({ shutdownTimeoutMs = 240000, onShutdownTimeout = () => process.exit(1), onUpdate } = {}) {
   let stopping = false;
   let shutdownTimer;
   let db;
-  function dispose() {
-    clearTimeout(shutdownTimer);
-  }
+  const updates = createWorkQueue({ concurrency: updateWorkers, maxPending: 100 });
+  function dispose() { clearTimeout(shutdownTimer); }
   function requestStop() {
     if (stopping) return;
     stopping = true;
+    backgroundStopping = true;
     console.info('Neo Sisra shutdown requested; finishing current updates and deliveries.');
     shutdownTimer = setTimeout(() => {
-      try { if (db) saveDb(db); } catch (error) { console.error(safeError(error)); }
       console.error('Neo Sisra shutdown deadline reached; unfinished deliveries require explicit retry.');
       onShutdownTimeout();
     }, shutdownTimeoutMs);
   }
+  async function processBatch(batch) {
+    if (!Array.isArray(batch) || batch.length > 100 || batch.some(u => !Number.isSafeInteger(u.update_id) || u.update_id < 0)) throw new Error('Telegram update batch is invalid.');
+    const ordered = [...new Map(batch.map(u => [u.update_id,u])).values()].sort((a,b) => a.update_id-b.update_id);
+    const completed = new Set(db.completed_update_ids || []);
+    let prefix = 0;
+    const commit = id => {
+      completed.add(id);
+      while (prefix < ordered.length && (ordered[prefix].update_id <= db.last_update_id || completed.has(ordered[prefix].update_id))) {
+        db.last_update_id = Math.max(db.last_update_id, ordered[prefix].update_id);
+        completed.delete(ordered[prefix].update_id);
+        prefix++;
+      }
+      db.completed_update_ids = [...completed].filter(value => value > db.last_update_id).sort((a,b) => a-b);
+      saveDb(db);
+    };
+    const work = ordered.map(update => {
+      const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? update.callback_query?.from?.id ?? 'other';
+      return updates.run(String(chatId), async () => {
+        if (storageFailure) throw storageFailure;
+        if (update.update_id > db.last_update_id && !completed.has(update.update_id)) {
+          try {
+            if (onUpdate) await onUpdate(update, db);
+            else if (update.message) await handleMessage(update.message, db);
+            else if (update.callback_query) await handleCallback(update.callback_query, db);
+          } catch (error) {
+            if (error.code === 'STATE_STORE_ERROR' || storageFailure) throw storageFailure || error;
+            console.error('Update: '+safeError(error));
+            try {
+              if (update.message) await sendMessage(chatId,'Xatolik yuz berdi. /status orqali holatni tekshiring yoki qayta urinib koʻring.');
+              else if (update.callback_query) await answerCb(update.callback_query.id,'Xatolik');
+            } catch (replyError) { console.error(safeError(replyError)); }
+          }
+        }
+        // Commit only the completed prefix. Out-of-order completions are durable
+        // so a restart can skip them without acknowledging an unfinished gap.
+        commit(update.update_id);
+      });
+    });
+    const results = await Promise.allSettled(work);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }
   async function run() {
     if (stopping) { dispose(); return; }
+    backgroundStopping = false;
     db = recoverInterrupted(loadDb());
     saveDb(db);
-    let offset = Number(db.last_update_id || 0) + 1;
+    pumpDeliveries(db);
     let connected = false;
     try {
       while (!stopping) {
+        if (storageFailure) throw storageFailure;
+        let payload;
         try {
-          const url = `${API}/getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT_SECONDS}&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'callback_query']))}`;
-          const payload = await fetchJson(url, { method: 'GET' }, POLL_FETCH_TIMEOUT_MS, 'Telegram getUpdates');
+          const url = API+'/getUpdates?offset='+(Number(db.last_update_id || 0)+1)+'&limit=100&timeout='+POLL_TIMEOUT_SECONDS+'&allowed_updates='+encodeURIComponent(JSON.stringify(['message','callback_query']));
+          payload = await fetchJson(url,{method:'GET'},POLL_FETCH_TIMEOUT_MS,'Telegram getUpdates');
           if (!payload.ok) throw new Error('Telegram polling bajarilmadi (kod '+Number(payload.error_code||0)+').');
-          if (!connected) { console.info('Neo Sisra polling ready.'); connected = true; }
-          for (const update of payload.result) {
-            if (update.message) {
-              try {
-                await handleMessage(update.message, db);
-              } catch (err) {
-                console.error(safeError(err));
-                await sendMessage(update.message.chat.id, 'Xatolik yuz berdi. /status orqali holatni tekshiring yoki qayta urinib koʻring.');
-              }
-            } else if (update.callback_query) {
-              try {
-                await handleCallback(update.callback_query, db);
-              } catch (err) {
-                console.error(`Callback xatoligi: ${safeError(err)}`);
-                try {
-                  await answerCb(update.callback_query.id, 'Xatolik');
-                } catch {
-                  // ignore
-                }
-              }
-            }
-            // A shutdown finishes the returned batch. Persist the offset only after
-            // handling each update, so an interrupted handler is not acknowledged.
-            offset = update.update_id + 1;
-            db.last_update_id = update.update_id;
-            saveDb(db);
-          }
-        } catch (err) {
-          console.error(`Polling xatoligi: ${safeError(err)}`);
-          if (!stopping) await new Promise((resolve) => setTimeout(resolve, 5000));
+        } catch (error) {
+          console.error('Polling: '+safeError(error));
+          if (!stopping) await sleep(5000);
+          continue;
         }
+        if (!connected) { console.info('Neo Sisra polling ready.'); connected = true; }
+        await processBatch(payload.result);
       }
-      while (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
+      await waitForBackground();
+      await telegramQueue.idle?.();
       saveDb(db);
       console.info('Neo Sisra shutdown complete.');
     } finally {
+      backgroundStopping = true;
       dispose();
+      while (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
+      // All fetched handlers have settled before this point. On fatal storage
+      // failure stop rather than acknowledging more Telegram updates.
+      if (!storageFailure) closeStore();
     }
   }
   return { run, requestStop, dispose };
 }
 
-if (require.main === module) {
-  if (!BOT_TOKEN) {
-    console.error('BOT_TOKEN .env faylida yoq');
-    process.exit(1);
-  }
-
-  if (!GOOGLE_SCRIPT_URL) { console.error('GOOGLE_SCRIPT_URL sozlanishi kerak.'); process.exit(1); }
+async function start() {
+  if (!BOT_TOKEN) throw new Error('BOT_TOKEN .env faylida yoq');
+  if (!GOOGLE_SCRIPT_URL) throw new Error('GOOGLE_SCRIPT_URL sozlanishi kerak.');
+  // Acquire the data lock before connecting a second polling process.
+  loadDb();
   const runtime = createPollingRuntime();
-  process.on('SIGTERM', runtime.requestStop);
-  process.on('SIGINT', runtime.requestStop);
-  (async () => {
-    try {
-      const identity = await tg('getMe');
-      if (identity.username !== 'neo_sisrabot') throw new Error('Sozlangan token Neo Sisra botiga tegishli emas.');
-      console.info('Neo Sisra bot identity verified: @'+identity.username);
-      await runtime.run();
-    } finally {
-      runtime.dispose();
-      process.removeListener('SIGTERM', runtime.requestStop);
-      process.removeListener('SIGINT', runtime.requestStop);
-    }
-  })().catch(error => { console.error(safeError(error)); process.exitCode=1; });
+  process.on('SIGTERM',runtime.requestStop);
+  process.on('SIGINT',runtime.requestStop);
+  try {
+    const identity = await tg('getMe');
+    if (identity.username !== 'neo_sisrabot') throw new Error('Sozlangan token Neo Sisra botiga tegishli emas.');
+    console.info('Neo Sisra bot identity verified: @'+identity.username);
+    await runtime.run();
+  } finally {
+    runtime.dispose();
+    process.removeListener('SIGTERM',runtime.requestStop);
+    process.removeListener('SIGINT',runtime.requestStop);
+    if (!storageFailure) closeStore();
+  }
+}
+return { emptyDb, exportExcel, normalizePhone, paymentText, handleMessage, handleCallback,
+  recoverInterrupted, createPollingRuntime, leadReport, waitForBackground, loadDb, saveDb,
+  closeStore, pumpDeliveries, start,
+  queueStats: () => ({ deliveries: deliveryQueue.stats(), telegram: telegramQueue.stats?.() }) };
 }
 
-module.exports = {
-  emptyDb,
-  exportExcel,
-  normalizePhone,
-  paymentText,
-  handleMessage,
-  handleCallback,
-  recoverInterrupted,
-  createPollingRuntime,
-  leadReport,
-  waitForBackground: () => Promise.all([...pendingTasks]),
-};
+module.exports = { createBot };
+// Preserve the small helper API for consumers; defer configuration and opening
+// the database until a helper is actually used.
+let defaultBot;
+for (const name of ['emptyDb','exportExcel','normalizePhone','paymentText','handleMessage','handleCallback','recoverInterrupted','createPollingRuntime','leadReport','waitForBackground','loadDb','saveDb','closeStore']) {
+  module.exports[name] = (...args) => (defaultBot ||= createBot())[name](...args);
+}
+if (require.main === module) {
+  Promise.resolve().then(() => createBot().start()).catch(error => {
+    // Do not print transport URLs, bot credentials, or exception causes.
+    console.error(String(error.message || 'Bot failed').replace(/https?:\/\/api\.telegram\.org\/[^\s"']+/g,'[Telegram API]').replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g,'[TOKEN]'));
+    process.exitCode = 1;
+  });
+}
