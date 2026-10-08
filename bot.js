@@ -36,7 +36,7 @@ function splitCsv(value) {
 const PRIMARY_ADMIN_IDS = splitCsv(process.env.PRIMARY_ADMIN_IDS || process.env.ADMIN_IDS);
 const EXTRA_ADMIN_IDS = splitCsv(process.env.EXTRA_ADMIN_IDS);
 const ADMIN_IDS = [...new Set([...PRIMARY_ADMIN_IDS, ...EXTRA_ADMIN_IDS])];
-const { createGoogleDelivery, validateReceipt } = require('./google-delivery.cjs');
+const { createGoogleDelivery, createPhoneUpdater, validateReceipt } = require('./google-delivery.cjs');
 const { fetchJson, fetchBytes } = require('./telegram-http.cjs');
 const { createStateStore } = require('./state-store.cjs');
 const { createWorkQueue } = require('./work-queue.cjs');
@@ -54,6 +54,14 @@ const telegramQueue = options.telegramQueue || createTelegramQueue({
   perChatMs: 1050, groupMs: 3100, concurrency: 16, maxPending: 500,
 });
 const google = options.google || createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
+const phoneUpdateEndpoint = (process.env.PHONE_UPDATE_SCRIPT_URL || '').trim();
+const phoneUpdateSecret = (process.env.PHONE_UPDATE_SECRET || '').trim();
+const phoneUpdater = options.phoneUpdater || (phoneUpdateEndpoint && phoneUpdateSecret
+  ? createPhoneUpdater({ endpoint: phoneUpdateEndpoint, secret: phoneUpdateSecret }) : null);
+const phoneRetryBaseMs = options.phoneRetryBaseMs || 1000;
+const phoneUpdateFlights = new Set();
+let phoneRetryTimer;
+let phoneUpdatesClosed = false;
 let store = options.stateStore;
 let storageFailure;
 let backgroundStopping = false;
@@ -120,7 +128,15 @@ function safeError(error) {
   return String(error?.message || error || 'Xatolik').replace(/https?:\/\/api\.telegram\.org\/[^\s"']+/g, '[Telegram API]').replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g, '[TOKEN]');
 }
 function profileFor(row) {
-  return {name:row.name, phone:row.phone, additionalPhone:row.additional_phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
+  return {name:row.name, ...contactFor(row), offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
+}
+function contactFor(row) {
+  const phone = row.latest_phone || row.phone;
+  const additionalPhone = row.latest_phone ? row.latest_additional_phone : row.additional_phone;
+  return { phone, additionalPhone: additionalPhone && additionalPhone !== phone ? additionalPhone : '' };
+}
+function latestContactFields(profile) {
+  return profile.latest_phone ? { latest_phone: profile.latest_phone, latest_additional_phone: profile.latest_additional_phone || '' } : {};
 }
 function retryKeyboard() {
   return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
@@ -466,6 +482,131 @@ function runInBackground(label, fn) {
   const task=Promise.resolve().then(fn).catch(err=>console.error(label+': '+safeError(err))).finally(()=>pendingTasks.delete(task));
   pendingTasks.add(task);
 }
+function stopPhoneRetryTimer() {
+  clearTimeout(phoneRetryTimer);
+  phoneRetryTimer = undefined;
+}
+function schedulePhoneRetry(db) {
+  stopPhoneRetryTimer();
+  if (!phoneUpdater || backgroundStopping || phoneUpdatesClosed || storageFailure) return;
+  const due = Object.entries(db.phone_updates || {})
+    .filter(([key, entry]) => entry.status === 'pending' && !phoneUpdateFlights.has(key))
+    .map(([, entry]) => Number(entry.retry_at) || 0);
+  if (!due.length || phoneUpdateFlights.size >= Math.min(deliveryWorkers, 2)) return;
+  const delay = Math.max(1, Math.min(60000, Math.min(...due) - Date.now()));
+  phoneRetryTimer = setTimeout(() => {
+    phoneRetryTimer = undefined;
+    try { pumpPhoneUpdates(db); } catch (error) { console.error('Phone update: ' + safeError(error)); }
+  }, delay);
+  phoneRetryTimer.unref?.();
+}
+function pumpPhoneUpdates(db) {
+  if (!phoneUpdater || backgroundStopping || phoneUpdatesClosed || storageFailure) return;
+  stopPhoneRetryTimer();
+  for (const [key, entry] of Object.entries(db.phone_updates || {})) {
+    if (phoneUpdateFlights.size >= Math.min(deliveryWorkers, 2)) break;
+    if (entry.status !== 'pending' || phoneUpdateFlights.has(key) || (Number(entry.retry_at) || 0) > Date.now()) continue;
+    const snapshot = { telegramId: key, phone: entry.phone, additionalPhone: entry.additional_phone || null,
+      revision: entry.revision, updatedAt: entry.updated_at };
+    entry.status = 'sending';
+    saveDb(db);
+    phoneUpdateFlights.add(key);
+    runInBackground('Phone update', async () => {
+      try {
+        const result = await phoneUpdater.updatePhone(snapshot);
+        if (result?.ok !== true || result.revision !== snapshot.revision ||
+            (result.telegramId !== undefined && String(result.telegramId) !== key)) {
+          throw new Error('Telefon yangilanishi jadval tomonidan tasdiqlanmadi.');
+        }
+        const current = db.phone_updates?.[key];
+        if (current?.revision === snapshot.revision) {
+          current.status = 'sent'; current.retry_at = 0; current.synced_at = new Date().toISOString();
+          delete current.error;
+          saveDb(db);
+        }
+      } catch (error) {
+        if (error.code === 'STATE_STORE_ERROR' || storageFailure) throw storageFailure || error;
+        const current = db.phone_updates?.[key];
+        if (current?.revision === snapshot.revision) {
+          current.status = 'pending'; current.attempts = (Number(current.attempts) || 0) + 1;
+          current.retry_at = Date.now() + Math.min(60000, phoneRetryBaseMs * (2 ** Math.min(current.attempts - 1, 16)));
+          current.error = 'Telefon raqami jadvalga yetkazilgani tasdiqlanmadi.';
+          saveDb(db);
+        }
+        console.error('Phone update delivery not confirmed; saved correction will retry.');
+      } finally {
+        phoneUpdateFlights.delete(key);
+        if (!storageFailure && !phoneUpdatesClosed && !backgroundStopping) pumpPhoneUpdates(db);
+      }
+    });
+  }
+  schedulePhoneRetry(db);
+}
+function recordPhoneUpdate(db, chatId, phone, additionalPhone, messageId) {
+  const key = userKey(chatId);
+  if (db.phone_update_requests?.[key]) delete db.phone_update_requests[key];
+  db.phone_updates ||= {};
+  const previous = db.phone_updates[key];
+  const additional = additionalPhone && additionalPhone !== phone ? additionalPhone : '';
+  if (previous && previous.phone === phone && (previous.additional_phone || '') === additional) {
+    if (previous.status === 'pending') previous.retry_at = 0;
+    saveDb(db);
+    return previous;
+  }
+  const revision = Math.max(Date.now(), (Number(previous?.revision) || 0) + 1);
+  db.phone_updates[key] = { phone, additional_phone: additional, revision, updated_at: new Date().toISOString(),
+    message_id: Number.isSafeInteger(messageId) ? messageId : null, status: 'pending', attempts: 0, retry_at: 0 };
+  // Original phone fields are receipt identity/history. Latest contact fields
+  // supply current outbound details without rewriting receipt dedupe keys.
+  const fields = { latest_phone: phone, latest_additional_phone: additional };
+  const profile = db.users[key];
+  if (profile) Object.assign(profile, fields);
+  for (const row of [...db.registrations, ...db.payments]) {
+    if (String(row.telegram_id) === key) Object.assign(row, fields);
+  }
+  saveDb(db);
+  return db.phone_updates[key];
+}
+async function handlePhoneCorrection(message, db, profile, text) {
+  const chatId = message.chat.id;
+  const requested = Boolean(db.phone_update_requests?.[userKey(chatId)]);
+  if (!phoneUpdater || (profile && !['offer', 'receipt', 'done'].includes(profile.step) && !requested)) return false;
+  const registration = [...db.registrations].reverse().find(row => String(row.telegram_id) === String(chatId));
+  if (!registration && !profile?.offerAccepted) return false;
+  if (message.photo?.length || message.document || message.video || message.audio || message.voice || message.sticker) return false;
+  const looksLikePhone = Boolean(message.contact) || (!text.startsWith('/') &&
+    (requested || text.startsWith('+') || /^\d[\d ()-]*$/.test(text) || text.replace(/\D/g, '').length >= 6));
+  if (!looksLikePhone) return false;
+  if (message.contact?.user_id && message.contact.user_id !== message.from?.id) {
+    await sendMessage(chatId, 'Oʻzingizning telefon raqamingizni yuboring.');
+    return true;
+  }
+  const raw = message.contact?.phone_number || text;
+  const phone = normalizePhone(raw);
+  if (!phone) {
+    await sendMessage(chatId, phoneValidationMessage(raw));
+    return true;
+  }
+  const previous = db.phone_updates?.[userKey(chatId)];
+  const additional = previous ? previous.additional_phone : contactFor(profile || registration).additionalPhone;
+  recordPhoneUpdate(db, chatId, phone, additional, message.message_id);
+  try {
+    await sendMessage(chatId, '✅ Telefon raqamingiz qabul qilindi. Siz bilan shu raqam orqali bogʻlanamiz.', removeKeyboard());
+  } finally {
+    pumpPhoneUpdates(db);
+  }
+  return true;
+}
+function canRequestPhoneUpdate(db, chatId) {
+  return Boolean(phoneUpdater && (db.users[userKey(chatId)]?.offerAccepted ||
+    db.registrations.some(row => String(row.telegram_id) === String(chatId))));
+}
+async function requestPhoneUpdate(db, chatId) {
+  db.phone_update_requests ||= {};
+  db.phone_update_requests[userKey(chatId)] = true;
+  saveDb(db);
+  await askPhone(chatId);
+}
 // Rows enter the durable outbox before any network work. Only a fixed number
 // are materialized as promises; the rest stay pending in SQLite.
 function pumpDeliveries(db) {
@@ -492,7 +633,7 @@ function claimDelivery(db, collection, row) {
   return storageAction(() => storage().claimDelivery(collection, row.id, ['pending']));
 }
 function newRegistration(db, profile) {
-  const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
+  const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',...latestContactFields(profile),tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
   db.registrations.push(row);
   saveDb(db);
   return db.registrations.at(-1);
@@ -581,11 +722,11 @@ function xmlSheet(name, rows) {
 function exportExcel(db) {
   const regRows = [
     ['Ism', 'Telefon raqam', 'Qoʻshimcha telefon raqam', 'Tarif', 'Oferta', 'Sana', 'Telegram ID', 'Username'],
-    ...db.registrations.map((r) => [r.name, r.phone, r.additional_phone || '', r.tariff, r.offer, r.date, r.telegram_id, r.username]),
+    ...db.registrations.map((r) => { const c = contactFor(r); return [r.name, c.phone, c.additionalPhone, r.tariff, r.offer, r.date, r.telegram_id, r.username]; }),
   ];
   const payRows = [
     ['Ism', 'Telefon raqam', 'Qoʻshimcha telefon raqam', 'Tarif', 'Oferta', 'Check URL', 'Sana', 'vaqt', 'Telegram ID', 'Username'],
-    ...db.payments.map((r) => [r.name, r.phone, r.additional_phone || '', r.tariff, r.offer, r.check_url, r.date, r.time, r.telegram_id, r.username]),
+    ...db.payments.map((r) => { const c = contactFor(r); return [r.name, c.phone, c.additionalPhone, r.tariff, r.offer, r.check_url, r.date, r.time, r.telegram_id, r.username]; }),
   ];
   const xml = `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
@@ -677,6 +818,7 @@ async function resumeOffer(db, chatId, profile) {
 }
 
 async function startRegistration(db, chatId, message) {
+  if (db.phone_update_requests?.[userKey(chatId)]) delete db.phone_update_requests[userKey(chatId)];
   db.users[userKey(chatId)] = {
     chat_id: chatId,
     username: message.from?.username || '',
@@ -874,8 +1016,17 @@ async function handleOfferCallback(cb,db) {
     await askOffer(chatId);return;
   }
   profile.offerAccepted=true;profile.offerVersion=OFFER_VERSION;profile.tariff=SERVICE_NAME;profile.step='receipt';
+  // Completing /start again is an explicit new contact submission. The prior
+  // correction remains durable while the fresh registration is incomplete.
+  const priorPhoneUpdate = db.phone_updates?.[userKey(chatId)];
+  const currentContact = contactFor(profile);
+  if (phoneUpdater && priorPhoneUpdate && (!profile.latest_phone || priorPhoneUpdate.phone !== currentContact.phone ||
+      (priorPhoneUpdate.additional_phone || '') !== currentContact.additionalPhone)) {
+    recordPhoneUpdate(db, chatId, currentContact.phone, currentContact.additionalPhone, cb.message?.message_id);
+  }
   newRegistration(db,profile);
   pumpDeliveries(db);
+  pumpPhoneUpdates(db);
   await answerCb(cb.id,'Roziligingiz qabul qilindi');
   await sendPayment(chatId);
 }
@@ -922,6 +1073,16 @@ async function handlePaymentCallback(cb, db) {
 
 async function handleCallback(cb, db) {
   const data = String(cb.data || '');
+  if (data === 'phone:update') {
+    const chatId = cb.message?.chat?.id;
+    if (cb.message?.chat?.type !== 'private' || cb.from?.id !== chatId || !canRequestPhoneUpdate(db, chatId)) {
+      await answerCb(cb.id, 'Telefon raqamini yangilash uchun avval botda roʻyxatdan oʻting.');
+      return;
+    }
+    await answerCb(cb.id);
+    await requestPhoneUpdate(db, chatId);
+    return;
+  }
   if (data.startsWith('offer:')) {
     await handleOfferCallback(cb, db);
     return;
@@ -1011,7 +1172,8 @@ function formatTelegramIdLink(telegramId) {
 }
 
 function leadReport(row,title,withCheck=false) {
-  return [title,'','<b>Ism Familiya:</b> '+escHtml(dash(row.name)),'<b>Telefon:</b> '+escHtml(dash(row.phone)),...(row.additional_phone?['<b>Qoʻshimcha telefon:</b> '+escHtml(row.additional_phone)]:[]),'<b>Xizmat:</b> '+SERVICE_NAME,'<b>Oferta:</b> '+escHtml(row.offer),'<b>Telegram ID:</b> '+formatTelegramIdLink(row.telegram_id),'<b>Telegram:</b> '+escHtml(formatUsername(row.username)),'<b>Sheets:</b> '+(row.status==='sent'?'Yuborildi':'Yuborish tasdiqlanmadi'),...(withCheck?['<b>Chek (Google Drive):</b>',escHtml(row.check_url_google||'—')]:[])].join('\n');
+  const contact = contactFor(row);
+  return [title,'','<b>Ism Familiya:</b> '+escHtml(dash(row.name)),'<b>Telefon:</b> '+escHtml(dash(contact.phone)),...(contact.additionalPhone?['<b>Qoʻshimcha telefon:</b> '+escHtml(contact.additionalPhone)]:[]),'<b>Xizmat:</b> '+SERVICE_NAME,'<b>Oferta:</b> '+escHtml(row.offer),'<b>Telegram ID:</b> '+formatTelegramIdLink(row.telegram_id),'<b>Telegram:</b> '+escHtml(formatUsername(row.username)),'<b>Sheets:</b> '+(row.status==='sent'?'Yuborildi':'Yuborish tasdiqlanmadi'),...(withCheck?['<b>Chek (Google Drive):</b>',escHtml(row.check_url_google||'—')]:[])].join('\n');
 }
 
 async function sendToTopic(threadId, text) {
@@ -1069,7 +1231,14 @@ async function handleMessage(message,db) {
   if(text==='/id') {await sendMessage(chatId,'Sizning Telegram ID: '+message.from.id);return;}
   if(isAdmin(message)) {registerAdmin(db,chatId);if(await handleAdmin(message,db))return;}
   if(/^\/start(?:\s|$)/.test(text) || text==='Qayta boshlash' || WELCOME_BUTTONS.includes(text)) {await startRegistration(db,chatId,message);return;}
+  if (text === '/phone') {
+    if (message.from?.id !== chatId) return;
+    if (canRequestPhoneUpdate(db, chatId)) await requestPhoneUpdate(db, chatId);
+    else await sendMessage(chatId, 'Telefon raqamini yangilash uchun avval botda roʻyxatdan oʻting.');
+    return;
+  }
   const profile=db.users[userKey(chatId)];
+  if (await handlePhoneCorrection(message, db, profile, text)) return;
   if(!profile) {await startRegistration(db,chatId,message);return;}
   if(text==='/payment' || text==='💳 Toʻlov') {
     if (hasCurrentConsent(profile)) await sendPayment(chatId);
@@ -1102,13 +1271,15 @@ async function handleMessage(message,db) {
     if(message.contact?.user_id && message.contact.user_id!==message.from?.id) {await sendMessage(chatId,'Oʻzingizning telefon raqamingizni yuboring.');return;}
     const phone=normalizePhone(message.contact?.phone_number||text);
     if(!phone) {await sendMessage(chatId,phoneValidationMessage(message.contact?.phone_number||text));return;}
-    profile.phone=phone;profile.step='additional_phone';saveDb(db);await askAdditionalPhone(chatId);return;
+    profile.phone=phone;delete profile.latest_phone;delete profile.latest_additional_phone;
+    profile.step='additional_phone';saveDb(db);await askAdditionalPhone(chatId);return;
   }
   if(profile.step==='additional_phone') {
     const phone=normalizePhone(message.contact?.phone_number||text);
     if(!phone) {await sendMessage(chatId,phoneValidationMessage(message.contact?.phone_number||text,true));return;}
-    if(phone===normalizePhone(profile.phone)) {await sendMessage(chatId,'Bu raqamni avval kiritdingiz. Qoʻshimcha aloqa uchun boshqa telefon raqamini kiriting.');return;}
-    profile.additional_phone=phone;profile.step='offer';saveDb(db);await askOffer(chatId);return;
+    if(phone===normalizePhone(contactFor(profile).phone)) {await sendMessage(chatId,'Bu raqamni avval kiritdingiz. Qoʻshimcha aloqa uchun boshqa telefon raqamini kiriting.');return;}
+    profile.additional_phone=phone;if(profile.latest_phone)profile.latest_additional_phone=phone;
+    profile.step='offer';saveDb(db);await askOffer(chatId);return;
   }
   if(profile.step==='offer') {await resumeOffer(db,chatId,profile);return;}
   if(profile.step==='receipt'||profile.step==='done') {
@@ -1118,7 +1289,7 @@ async function handleMessage(message,db) {
     const existing=storageAction(() => storage().findReceipt({telegram_id:chatId,name:profile.name,phone:profile.phone,offer_version:profile.offerVersion,receipt}));
     if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?paymentKeyboard(true):retryKeyboard());return;}
     const parts=nowParts();
-    const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
+    const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',...latestContactFields(profile),tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
     db.payments.push(row);profile.step='done';saveDb(db);
     pumpDeliveries(db);
     await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.',paymentKeyboard(true));return;
@@ -1126,6 +1297,9 @@ async function handleMessage(message,db) {
 }
 function recoverInterrupted(db) {
   for(const row of [...db.registrations,...db.payments])if(row.status==='sending')row.status='failed';
+  for (const entry of Object.values(db.phone_updates || {})) {
+    if (entry.status === 'sending') { entry.status = 'pending'; entry.retry_at = 0; }
+  }
   if (db.broadcast_job?.status === 'running') {
     db.broadcast_job.status = 'interrupted';
     if (db.broadcast_job.in_flight) { db.broadcast_job.failed++; db.broadcast_job.in_flight = false; }
@@ -1138,19 +1312,20 @@ async function waitForBackground() {
     if (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
     await new Promise(resolve => setImmediate(resolve));
     if (storageFailure) throw storageFailure;
-  } while (pendingTasks.size || queuedDeliveries.size);
+  } while (pendingTasks.size || queuedDeliveries.size || phoneUpdateFlights.size);
 }
-function closeStore() { if (store) { store.close(); store = null; } }
+function closeStore() { phoneUpdatesClosed = true; stopPhoneRetryTimer(); if (store) { store.close(); store = null; } }
 function createPollingRuntime({ shutdownTimeoutMs = 240000, onShutdownTimeout = () => process.exit(1), onUpdate } = {}) {
   let stopping = false;
   let shutdownTimer;
   let db;
   const updates = createWorkQueue({ concurrency: updateWorkers, maxPending: 100 });
-  function dispose() { clearTimeout(shutdownTimer); }
+  function dispose() { clearTimeout(shutdownTimer); stopPhoneRetryTimer(); }
   function requestStop() {
     if (stopping) return;
     stopping = true;
     backgroundStopping = true;
+    stopPhoneRetryTimer();
     console.info('Neo Sisra shutdown requested; finishing current updates and deliveries.');
     shutdownTimer = setTimeout(() => {
       console.error('Neo Sisra shutdown deadline reached; unfinished deliveries require explicit retry.');
@@ -1205,6 +1380,7 @@ function createPollingRuntime({ shutdownTimeoutMs = 240000, onShutdownTimeout = 
     db = recoverInterrupted(loadDb());
     saveDb(db);
     pumpDeliveries(db);
+    pumpPhoneUpdates(db);
     let connected = false;
     try {
       while (!stopping) {
@@ -1260,7 +1436,7 @@ async function start() {
 }
 return { emptyDb, exportExcel, normalizePhone, paymentText, handleMessage, handleCallback,
   recoverInterrupted, createPollingRuntime, leadReport, waitForBackground, loadDb, saveDb,
-  closeStore, pumpDeliveries, start,
+  closeStore, pumpDeliveries, pumpPhoneUpdates, start,
   queueStats: () => ({ deliveries: deliveryQueue.stats(), telegram: telegramQueue.stats?.() }) };
 }
 

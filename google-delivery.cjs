@@ -170,4 +170,81 @@ function createGoogleDelivery({ endpoint, fetchImpl = globalThis.fetch, timeoutM
   });
 }
 
-module.exports = { createGoogleDelivery, validateReceipt };
+function phoneUpdateSnapshot(input) {
+  const telegramId = typeof input?.telegramId === 'number'
+    ? String(input.telegramId) : input?.telegramId;
+  const phone = input?.phone;
+  const additionalPhone = input?.additionalPhone ?? null;
+  const revision = input?.revision;
+  const updatedAt = input?.updatedAt;
+  let validDate = false;
+  if (typeof updatedAt === 'string') {
+    const date = new Date(updatedAt);
+    validDate = Number.isFinite(date.valueOf()) && date.toISOString() === updatedAt;
+  }
+  if (typeof telegramId !== 'string' || !/^[1-9]\d*$/.test(telegramId) ||
+      !Number.isSafeInteger(Number(telegramId)) || typeof phone !== 'string' ||
+      !/^\+[1-9]\d{6,14}$/.test(phone) ||
+      (additionalPhone !== null && (typeof additionalPhone !== 'string' ||
+        !/^\+[1-9]\d{6,14}$/.test(additionalPhone) || additionalPhone === phone)) ||
+      !Number.isSafeInteger(revision) || revision < 1 || !validDate) {
+    throw failure('INVALID_PHONE_UPDATE', 'Phone update data is invalid.');
+  }
+  return Object.freeze({ telegramId, phone, additionalPhone, revision, updatedAt });
+}
+
+function createPhoneUpdater({ endpoint, secret, fetchImpl = globalThis.fetch, timeoutMs } = {}) {
+  let parsed;
+  try { parsed = new URL(endpoint); } catch { /* Keep configuration values private. */ }
+  if (!parsed || parsed.protocol !== 'https:' || parsed.hostname !== 'script.google.com' ||
+      parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash ||
+      !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(parsed.pathname) ||
+      typeof secret !== 'string' || secret.trim().length < 32 ||
+      /[\u0000-\u001f\u007f]/.test(secret) || typeof fetchImpl !== 'function' ||
+      (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0))) {
+    throw failure('INVALID_CONFIGURATION', 'Phone update configuration is invalid.');
+  }
+
+  return Object.freeze({
+    async updatePhone(input) {
+      const snapshot = phoneUpdateSnapshot(input);
+      // Serialize before yielding: a later profile edit must not change an in-flight update.
+      const body = JSON.stringify({ action: 'updatePhone', secret, ...snapshot });
+      const controller = new AbortController();
+      let expired = false;
+      let timer;
+      const deadline = new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          expired = true;
+          controller.abort();
+          reject(failure('PHONE_UPDATE_TIMEOUT', 'Phone update was not confirmed.'));
+        }, timeoutMs ?? 45000);
+      });
+      try {
+        const delivery = (async () => {
+          const response = await fetchImpl(parsed.href, {
+            method: 'POST', body, credentials: 'omit', signal: controller.signal,
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          });
+          if (response?.ok !== true) throw new Error('http');
+          const result = await response.json();
+          if (!result || result.result !== 'success' || result.updated !== true ||
+              result.telegramId !== snapshot.telegramId || result.revision !== snapshot.revision ||
+              !Number.isSafeInteger(result.matchedRows) || result.matchedRows < 1) {
+            throw new Error('acknowledgement');
+          }
+          return { ok: true, telegramId: snapshot.telegramId,
+            revision: snapshot.revision, matchedRows: result.matchedRows };
+        })();
+        return await Promise.race([delivery, deadline]);
+      } catch {
+        throw failure(expired ? 'PHONE_UPDATE_TIMEOUT' : 'PHONE_UPDATE_UNCONFIRMED',
+          'Phone update was not confirmed.');
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  });
+}
+
+module.exports = { createGoogleDelivery, createPhoneUpdater, validateReceipt };
