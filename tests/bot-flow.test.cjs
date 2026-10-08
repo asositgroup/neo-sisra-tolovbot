@@ -43,7 +43,7 @@ const msg=(id,text,extra={})=>({chat:{id,type:'private'},from:{id,username:'test
 const cb=(id,data)=>({id:'cb-'+id,from:{id},message:{chat:{id,type:'private'}},data});
 const sheetRequests=()=>requests.filter(r=>r.url.startsWith('https://script.google.com/'));
 const photo={photo:[{file_id:'TEST_PHOTO',file_unique_id:'TEST_UNIQUE',file_size:6}]};
-async function fill(db,id){await bot.handleMessage(msg(id,'/start'),db);await bot.handleMessage(msg(id,'TEST Neo Sisra'),db);await bot.handleMessage(msg(id,'+998901234567'),db);}
+async function fill(db,id){await bot.handleMessage(msg(id,'/start'),db);await bot.handleMessage(msg(id,'TEST Neo Sisra'),db);await bot.handleMessage(msg(id,'+998901234567'),db);await bot.handleMessage(msg(id,'+998911234567'),db);}
 for(const withImage of [false,true])test(`start sends one combined welcome and name prompt${withImage?' as an image caption':''}`,{timeout:5000},async()=>{
   if(withImage){
     const imagePath=path.join(testDirectory,'welcome.png');
@@ -92,6 +92,8 @@ test('consent is mandatory, one-service copy is used, and accepting twice cannot
   await bot.handleCallback(cb(101,'offer:yes'),db);await bot.waitForBackground();
   assert.equal(db.users['101'].step,'receipt');assert.equal(db.registrations.length,1);
   assert.equal(sheetRequests()[0].body.Oferta,'Roziman');assert.equal(sheetRequests()[0].body.Tarif,'Koreyaga talaba yuborish');
+  assert.equal(db.registrations[0].additional_phone,'+998911234567');
+  assert.equal(sheetRequests()[0].body['Telefon raqam'],'+998901234567 / +998911234567');
   await bot.handleCallback(cb(101,'offer:yes'),db);await bot.waitForBackground();assert.equal(sheetRequests().length,1);
   const copy=bot.paymentText();assert.match(copy,/Neo Sisra/);assert.doesNotMatch(copy,/Navola|Takhirov|Erkatoy|kurs|Malika|8600/);
 });
@@ -100,6 +102,55 @@ test('invalid phone letters and another person’s contact are rejected',async()
   await bot.handleMessage(msg(102,'abc901234567'),db);assert.equal(db.users['102'].step,'phone');
   await bot.handleMessage(msg(102,'',{contact:{phone_number:'998901234567',user_id:777}}),db);assert.equal(db.users['102'].step,'phone');
   assert.equal(bot.normalizePhone('+82 10 1234 5678'),'+821012345678');
+});
+test('a distinct valid second number is mandatory and may be a different person’s contact',async()=>{
+  requests.length=0;const db=bot.loadDb();
+  await bot.handleMessage(msg(112,'/start'),db);await bot.handleMessage(msg(112,'Offline Person'),db);
+  await bot.handleMessage(msg(112,'',{contact:{phone_number:'998901234567',user_id:112}}),db);
+  assert.equal(db.users['112'].step,'additional_phone');
+  assert.equal(db.users['112'].phone,'+998901234567');
+  assert.match(requests.at(-1).body.text,/Qoʻshimcha telefon raqamingizni kiriting/);
+  assert.deepEqual(requests.at(-1).body.reply_markup,{remove_keyboard:true});
+  for(const value of ['abc911234567','+99891123','+998 (90) 123-45-67','901234567']) {
+    await bot.handleMessage(msg(112,value),db);
+    assert.equal(db.users['112'].step,'additional_phone');
+    assert.equal(db.users['112'].additional_phone,undefined);
+  }
+  await bot.handleCallback(cb(112,'offer:yes'),db);
+  assert.equal(db.registrations.length,0);assert.equal(sheetRequests().length,0);
+  await bot.handleMessage(msg(112,'',{contact:{phone_number:'998911234567',user_id:777}}),db);
+  assert.equal(db.users['112'].step,'offer');
+  assert.equal(db.users['112'].additional_phone,'+998911234567');
+  assert.equal(sheetRequests().length,0,'Both numbers must still wait for explicit consent');
+});
+test('secondary phone step and both numbers survive restart, while start begins a fresh registration',async()=>{
+  let db=bot.loadDb();
+  await bot.handleMessage(msg(113,'/start'),db);await bot.handleMessage(msg(113,'Offline Person'),db);
+  await bot.handleMessage(msg(113,'+998901234567'),db);
+  bot.closeStore();bot=openBot();db=bot.loadDb();
+  assert.equal(db.users['113'].step,'additional_phone');assert.equal(db.users['113'].phone,'+998901234567');
+  await bot.handleMessage(msg(113,'+82 10 1234 5678'),db);
+  bot.closeStore();bot=openBot();db=bot.loadDb();
+  assert.equal(db.users['113'].step,'offer');assert.equal(db.users['113'].additional_phone,'+821012345678');
+  await bot.handleMessage(msg(113,'/start'),db);
+  assert.equal(db.users['113'].step,'name');assert.equal(db.users['113'].phone,undefined);assert.equal(db.users['113'].additional_phone,undefined);
+});
+test('unfinished one-phone offer profiles cannot bypass the new number step through old buttons or messages',async()=>{
+  const db=bot.loadDb();
+  for(const action of ['callback','payment','text']) {
+    requests.length=0;
+    db.users['114']={chat_id:114,name:'Offline Person',phone:'+998901234567',step:'offer'};
+    bot.saveDb(db);
+    if(action==='callback') await bot.handleCallback(cb(114,'offer:yes'),db);
+    else await bot.handleMessage(msg(114,action==='payment'?'/payment':'Continue'),db);
+    assert.equal(db.users['114'].step,'additional_phone',action);
+    assert.match(requests.at(-1).body.text,/Qoʻshimcha telefon raqamingizni kiriting/);
+    assert.equal(db.users['114'].offerAccepted,undefined);
+    assert.equal(db.registrations.length,0);assert.equal(sheetRequests().length,0);
+  }
+  await bot.handleMessage(msg(114,'+998911234567'),db);
+  await bot.handleCallback(cb(114,'offer:yes'),db);await bot.waitForBackground();
+  assert.equal(db.registrations.length,1);assert.equal(db.registrations[0].additional_phone,'+998911234567');
 });
 test('receipt acknowledgment is immediate while Google is held; exact file is not reposted and secrets stay out of persistence',async()=>{
   const db=bot.loadDb();await fill(db,103);await bot.handleCallback(cb(103,'offer:yes'),db);await bot.waitForBackground();requests.length=0;
@@ -113,9 +164,21 @@ test('receipt acknowledgment is immediate while Google is held; exact file is no
     assert.ok(JSON.stringify(readState({dataDir:testDirectory})).includes('TEST_PHOTO'));
     release();await bot.waitForBackground();assert.equal(db.payments[0].status,'sent');
     assert.equal(db.payments[0].check_url,'https://drive.google.com/file/d/TEST_RECEIPT_FILE/view');
+    assert.equal(db.payments[0].additional_phone,'+998911234567');
+    assert.equal(sheetRequests()[0].body['Telefon raqam'],'+998901234567 / +998911234567');
     const serialized=JSON.stringify(db);assert.doesNotMatch(serialized,/FAKE_TOKEN|api\.telegram\.org/);
     await bot.handleMessage(msg(103,'',photo),db);await bot.waitForBackground();assert.equal(sheetRequests().length,1);
   } finally {release();responseHook=null;}
+});
+test('both phone numbers are present in admin reports and separate Excel cells',async()=>{
+  const db=bot.loadDb();await fill(db,115);await bot.handleCallback(cb(115,'offer:yes'),db);await bot.waitForBackground();
+  await bot.handleMessage(msg(115,'',photo),db);await bot.waitForBackground();
+  for(const row of [db.registrations[0],db.payments[0]]) {
+    const report=bot.leadReport(row,'Offline Test',Boolean(row.receipt));
+    assert.match(report,/\+998901234567/);assert.match(report,/\+998911234567/);
+  }
+  const output=fs.readFileSync(bot.exportExcel(db),'utf8');
+  assert.equal((output.match(/\+998901234567<\/Data><\/Cell><Cell><Data ss:Type="String">\+998911234567/g)||[]).length,2,'Registration and receipt exports must have separate adjacent phone cells');
 });
 test('failed delivery remains durable and retries reuse one local payment record',async()=>{
   const db=bot.loadDb();await fill(db,104);await bot.handleCallback(cb(104,'offer:yes'),db);await bot.waitForBackground();requests.length=0;

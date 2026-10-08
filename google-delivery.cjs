@@ -31,7 +31,13 @@ function validateProfile(profile) {
       typeof profile.phone !== 'string' || !/^\+[1-9]\d{6,14}$/.test(profile.phone)) {
     throw failure('INVALID_PROFILE', 'Ism va telefon raqamini tekshiring.');
   }
-  return { name, phone: profile.phone };
+  const additionalPhone = profile.additionalPhone;
+  if (additionalPhone !== undefined && additionalPhone !== null && additionalPhone !== '' &&
+      (typeof additionalPhone !== 'string' || !/^\+[1-9]\d{6,14}$/.test(additionalPhone) ||
+       additionalPhone === profile.phone)) {
+    throw failure('INVALID_PROFILE', 'Qo‘shimcha telefon raqamini tekshiring.');
+  }
+  return { name, phone: profile.phone, additionalPhone: additionalPhone || null };
 }
 
 function validateReceipt(bytes, fileName, mimeType) {
@@ -69,7 +75,9 @@ function makePayload(profile, receipt) {
   form.append('sheetName', receipt ? 'Chek Yuborganlar' : 'Royhatdan otganlar');
   form.append('imageUpload', receipt ? 'true' : 'false');
   form.append('Ism', profile.name);
-  form.append('Telefon raqam', profile.phone);
+  // Keep the existing Apps Script/Sheets column contract, including legacy leads.
+  form.append('Telefon raqam', profile.additionalPhone
+    ? `${profile.phone} / ${profile.additionalPhone}` : profile.phone);
   form.append('Tarif', SERVICE_NAME);
   const date = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Tashkent', year: 'numeric', month: '2-digit', day: '2-digit',

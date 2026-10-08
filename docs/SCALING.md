@@ -1,6 +1,6 @@
 # Yuklama, navbatlar va tiklash
 
-Bot bir nechta foydalanuvchining xabarini parallel qayta ishlaydi. Bir odamning xabarlari esa o‘z tartibida bajariladi: ism, telefon, oferta va chek bosqichlari aralashmaydi. Bu sozlamalar **bir vaqtda nechta odamga kechikishsiz xizmat kafolati** emas. Javob vaqti Telegram, Google, tarmoq, fayl hajmi va navbatdagi ishga bog‘liq.
+Bot bir nechta foydalanuvchining xabarini parallel qayta ishlaydi. Bir odamning xabarlari esa o‘z tartibida bajariladi: ism, asosiy telefon, qo‘shimcha telefon, oferta va chek bosqichlari aralashmaydi. Bu sozlamalar **bir vaqtda nechta odamga kechikishsiz xizmat kafolati** emas. Javob vaqti Telegram, Google, tarmoq, fayl hajmi va navbatdagi ishga bog‘liq.
 
 ## Amaldagi chegaralar
 
@@ -34,6 +34,10 @@ Telegram bepul yuborish uchun bir chatda taxminan 1 xabar/soniya, guruhda 20 xab
 Google Apps Script’da ham hisob turi, xizmat va bir vaqtdagi bajarilishlar bo‘yicha kvotalar bor. To‘rtta fon ishlovchisi bu limitlarni bekor qilmaydi; real kvota xatolari va yuborish vaqtlarini kuzatish kerak. [Google Apps Script kvotalari](https://developers.google.com/apps-script/guides/services/quotas).
 
 ## Ma’lumot va chek qanday saqlanadi
+
+Yangi ro‘yxatdan o‘tishda ikkita turli telefon raqami majburiy. Asosiy raqam Telegram kontakt tugmasi yoki matn orqali, qo‘shimcha raqam esa matn yoki boshqa kontakt orqali olinadi. Har ikkisi tekshiriladi va xalqaro formatga keltiriladi; birinchi raqamning boshqa yozilishdagi nusxasi qo‘shimcha raqam sifatida qabul qilinmaydi. Qo‘shimcha raqam kiritilmaguncha yangi ro‘yxatdan o‘tish yakunlanmaydi.
+
+Profil, ro‘yxatdan o‘tish va chek yozuvlarida `phone` hamda `additional_phone` alohida saqlanadi. Google Sheets’dagi mavjud `Telefon raqam` katagiga `asosiy / qo‘shimcha` yuboriladi; Apps Script ustunlari o‘zgarmaydi. Admin xabarida ikkala raqam ko‘rsatiladi, Excel eksportida qo‘shimcha raqam alohida ustunda turadi. Avval ro‘yxatdan o‘tgan bir raqamli profillar to‘lov, chek, qayta yuborish va yangilangan ofertaga rozilik jarayonlarini davom ettira oladi. `/start` bilan yangi ro‘yxatdan o‘tish boshlansa, ikkala raqam qaytadan so‘raladi. Yangilanish paytida hali ro‘yxatdan o‘tmagan, oferta bosqichida turgan profildan ham qo‘shimcha raqam olinadi.
 
 Ro‘yxatdan o‘tish yoki chek yozuvi avval `data/bot_state.sqlite` ichiga yoziladi. Foydalanuvchiga qabul qilingani bildiriladi, Google Sheets/Drive’ga yetkazish fonda davom etadi. Chekni olish uchun Telegram `file_id` saqlanadi; bot tokeni bor Telegram fayl URL’i Sheets yoki bazaga yozilmaydi.
 

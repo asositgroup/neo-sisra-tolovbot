@@ -191,7 +191,7 @@ test('duplicate consent and repeated receipt updates through polling create one 
     sendReceipt: async () => { receipts++; return { fileUrl: 'https://drive.google.com/file/d/OFFLINE/view' }; },
   } });
   const bot = f.open(), db = bot.loadDb();
-  db.users['55'] = { chat_id: 55, step: 'offer', name: 'Offline Person', phone: '+998000000000' };
+  db.users['55'] = { chat_id: 55, step: 'offer', name: 'Offline Person', phone: '+998000000000', additional_phone: '+998000000001' };
   bot.saveDb(db);
   const photo = { photo: [{ file_id: 'OFFLINE_PHOTO', file_unique_id: 'OFFLINE_UNIQUE', file_size: 6 }] };
   const runtime = bot.createPollingRuntime();

@@ -120,7 +120,7 @@ function safeError(error) {
   return String(error?.message || error || 'Xatolik').replace(/https?:\/\/api\.telegram\.org\/[^\s"']+/g, '[Telegram API]').replace(/\b\d{6,12}:[A-Za-z0-9_-]{25,}\b/g, '[TOKEN]');
 }
 function profileFor(row) {
-  return {name:row.name, phone:row.phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
+  return {name:row.name, phone:row.phone, additionalPhone:row.additional_phone, offerAccepted:row.offer==='Roziman', offerVersion:row.offer_version};
 }
 function retryKeyboard() {
   return keyboard([['🔄 Qayta yuborish'], ['📋 Holat']]);
@@ -469,7 +469,7 @@ function claimDelivery(db, collection, row) {
   return storageAction(() => storage().claimDelivery(collection, row.id, ['pending']));
 }
 function newRegistration(db, profile) {
-  const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
+  const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:nowParts().full,telegram_id:profile.chat_id,username:profile.username||'',status:'pending'};
   db.registrations.push(row);
   saveDb(db);
   return db.registrations.at(-1);
@@ -557,12 +557,12 @@ function xmlSheet(name, rows) {
 
 function exportExcel(db) {
   const regRows = [
-    ['Ism', 'Telefon raqam', 'Tarif', 'Oferta', 'Sana', 'Telegram ID', 'Username'],
-    ...db.registrations.map((r) => [r.name, r.phone, r.tariff, r.offer, r.date, r.telegram_id, r.username]),
+    ['Ism', 'Telefon raqam', 'Qoʻshimcha telefon raqam', 'Tarif', 'Oferta', 'Sana', 'Telegram ID', 'Username'],
+    ...db.registrations.map((r) => [r.name, r.phone, r.additional_phone || '', r.tariff, r.offer, r.date, r.telegram_id, r.username]),
   ];
   const payRows = [
-    ['Ism', 'Telefon raqam', 'Tarif', 'Oferta', 'Check URL', 'Sana', 'vaqt', 'Telegram ID', 'Username'],
-    ...db.payments.map((r) => [r.name, r.phone, r.tariff, r.offer, r.check_url, r.date, r.time, r.telegram_id, r.username]),
+    ['Ism', 'Telefon raqam', 'Qoʻshimcha telefon raqam', 'Tarif', 'Oferta', 'Check URL', 'Sana', 'vaqt', 'Telegram ID', 'Username'],
+    ...db.payments.map((r) => [r.name, r.phone, r.additional_phone || '', r.tariff, r.offer, r.check_url, r.date, r.time, r.telegram_id, r.username]),
   ];
   const xml = `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
@@ -621,6 +621,32 @@ async function askPhone(chatId) {
 
 async function askOffer(chatId) {
   await sendHtml(chatId,'Davom etish uchun oferta shartlariga roziligingizni tasdiqlang.',{inline_keyboard:[[{text:'Oferta shartlarini oʻqish',callback_data:'offer:read'}],[{text:'✅ Roziman',callback_data:'offer:yes'},{text:'Rozimasman',callback_data:'offer:no'}]]});
+}
+
+async function askAdditionalPhone(chatId) {
+  await sendHtml(chatId, [
+    '📱 <b>Qoʻshimcha telefon raqamingizni kiriting.</b>',
+    '',
+    'Siz bilan bogʻlanishimiz uchun yana bitta boshqa raqamni +998901234567 formatida yuboring.',
+  ].join('\n'), removeKeyboard());
+}
+
+function needsAdditionalPhone(db, profile) {
+  const additionalPhone = normalizePhone(profile.additional_phone);
+  if (additionalPhone && additionalPhone !== normalizePhone(profile.phone)) return false;
+  // Previously registered users can finish payment or renew consent with their
+  // historical single-number profile. Every fresh phone step collects two.
+  return !profile.offerAccepted && !db.registrations.some(row => String(row.telegram_id) === String(profile.chat_id));
+}
+
+async function resumeOffer(db, chatId, profile) {
+  if (needsAdditionalPhone(db, profile)) {
+    profile.step = 'additional_phone';
+    saveDb(db);
+    await askAdditionalPhone(chatId);
+  } else {
+    await askOffer(chatId);
+  }
 }
 
 async function startRegistration(db, chatId, message) {
@@ -812,6 +838,10 @@ async function handleOfferCallback(cb,db) {
     return;
   }
   if(profile.step!=='offer') {await answerCb(cb.id,'Avval maʼlumotlaringizni kiriting.');return;}
+  if(needsAdditionalPhone(db,profile)) {
+    await answerCb(cb.id,'Qoʻshimcha telefon raqamingizni kiriting.');
+    await resumeOffer(db,chatId,profile);return;
+  }
   if(cb.data!=='offer:yes') {
     await answerCb(cb.id,'Davom etish uchun rozilik kerak.');
     await askOffer(chatId);return;
@@ -954,7 +984,7 @@ function formatTelegramIdLink(telegramId) {
 }
 
 function leadReport(row,title,withCheck=false) {
-  return [title,'','<b>Ism Familiya:</b> '+escHtml(dash(row.name)),'<b>Telefon:</b> '+escHtml(dash(row.phone)),'<b>Xizmat:</b> '+SERVICE_NAME,'<b>Oferta:</b> '+escHtml(row.offer),'<b>Telegram ID:</b> '+formatTelegramIdLink(row.telegram_id),'<b>Telegram:</b> '+escHtml(formatUsername(row.username)),'<b>Sheets:</b> '+(row.status==='sent'?'Yuborildi':'Yuborish tasdiqlanmadi'),...(withCheck?['<b>Chek (Google Drive):</b>',escHtml(row.check_url_google||'—')]:[])].join('\n');
+  return [title,'','<b>Ism Familiya:</b> '+escHtml(dash(row.name)),'<b>Telefon:</b> '+escHtml(dash(row.phone)),...(row.additional_phone?['<b>Qoʻshimcha telefon:</b> '+escHtml(row.additional_phone)]:[]),'<b>Xizmat:</b> '+SERVICE_NAME,'<b>Oferta:</b> '+escHtml(row.offer),'<b>Telegram ID:</b> '+formatTelegramIdLink(row.telegram_id),'<b>Telegram:</b> '+escHtml(formatUsername(row.username)),'<b>Sheets:</b> '+(row.status==='sent'?'Yuborildi':'Yuborish tasdiqlanmadi'),...(withCheck?['<b>Chek (Google Drive):</b>',escHtml(row.check_url_google||'—')]:[])].join('\n');
 }
 
 async function sendToTopic(threadId, text) {
@@ -1016,9 +1046,10 @@ async function handleMessage(message,db) {
   if(!profile) {await startRegistration(db,chatId,message);return;}
   if(text==='/payment' || text==='💳 Toʻlov') {
     if (hasCurrentConsent(profile)) await sendPayment(chatId);
-    else if (profile.step==='offer') await askOffer(chatId);
+    else if (profile.step==='offer') await resumeOffer(db,chatId,profile);
+    else if (profile.step==='additional_phone') await askAdditionalPhone(chatId);
     else if (['receipt','done'].includes(profile.step) && typeof profile.name==='string' && profile.name.trim() && normalizePhone(profile.phone)) {
-      profile.step='offer';saveDb(db);await askOffer(chatId);
+      profile.step='offer';saveDb(db);await resumeOffer(db,chatId,profile);
     }
     else await sendMessage(chatId,'Toʻlov maʼlumotlarini ochish uchun roʻyxatdan oʻtishni yakunlang va oferta shartlariga rozilik bering.');
     return;
@@ -1044,17 +1075,23 @@ async function handleMessage(message,db) {
     if(message.contact?.user_id && message.contact.user_id!==message.from?.id) {await sendMessage(chatId,'Oʻzingizning telefon raqamingizni yuboring.');return;}
     const phone=normalizePhone(message.contact?.phone_number||text);
     if(!phone) {await sendMessage(chatId,'Telefon raqamni +998901234567 formatida yuboring.');return;}
-    profile.phone=phone;profile.step='offer';saveDb(db);await askOffer(chatId);return;
+    profile.phone=phone;profile.step='additional_phone';saveDb(db);await askAdditionalPhone(chatId);return;
   }
-  if(profile.step==='offer') {await askOffer(chatId);return;}
+  if(profile.step==='additional_phone') {
+    const phone=normalizePhone(message.contact?.phone_number||text);
+    if(!phone) {await sendMessage(chatId,'Qoʻshimcha telefon raqamni +998901234567 formatida yuboring.');return;}
+    if(phone===normalizePhone(profile.phone)) {await sendMessage(chatId,'Bu raqamni avval kiritdingiz. Qoʻshimcha aloqa uchun boshqa telefon raqamini kiriting.');return;}
+    profile.additional_phone=phone;profile.step='offer';saveDb(db);await askOffer(chatId);return;
+  }
+  if(profile.step==='offer') {await resumeOffer(db,chatId,profile);return;}
   if(profile.step==='receipt'||profile.step==='done') {
-    if(!profile.offerAccepted || profile.offerVersion!==OFFER_VERSION) {profile.step='offer';saveDb(db);await askOffer(chatId);return;}
+    if(!profile.offerAccepted || profile.offerVersion!==OFFER_VERSION) {profile.step='offer';saveDb(db);await resumeOffer(db,chatId,profile);return;}
     const receipt=extractReceipt(message);
     if(!receipt||receipt.fileSize>10*1024*1024) {await sendMessage(chatId,'Toʻlov chekini PNG, JPG yoki PDF qilib yuboring. Hajmi 10 MB dan oshmasin.');return;}
     const existing=storageAction(() => storage().findReceipt({telegram_id:chatId,name:profile.name,phone:profile.phone,offer_version:profile.offerVersion,receipt}));
     if(existing) {await sendMessage(chatId,existing.status==='sent'?'Bu chek tekshirish uchun yuborilgan.':'Bu chek avval qabul qilingan. Holatni tekshirishingiz yoki qayta yuborishingiz mumkin.',existing.status==='sent'?paymentKeyboard(true):retryKeyboard());return;}
     const parts=nowParts();
-    const row={id:newItemId(),name:profile.name,phone:profile.phone,tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
+    const row={id:newItemId(),name:profile.name,phone:profile.phone,additional_phone:profile.additional_phone||'',tariff:SERVICE_NAME,offer:'Roziman',offer_version:profile.offerVersion,date:parts.date,time:parts.time,telegram_id:chatId,username:profile.username||'',receipt,status:'pending',check_url:''};
     db.payments.push(row);profile.step='done';saveDb(db);
     pumpDeliveries(db);
     await sendHtml(chatId,'✅ <b>Chekingiz qabul qilindi.</b>\nUni tekshirish uchun yuboramiz. Natija boʻyicha siz bilan bogʻlanamiz.',paymentKeyboard(true));return;

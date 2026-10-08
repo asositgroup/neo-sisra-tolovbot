@@ -68,6 +68,7 @@ function fixture(t, settings = {}, hook) {
       await bot.handleMessage(message(id, '/start'), db);
       await bot.handleMessage(message(id, 'Offline Person'), db);
       await bot.handleMessage(message(id, '+998901234567'), db);
+      await bot.handleMessage(message(id, '+998911234567'), db);
     },
     async consent(id = 101) {
       await bot.handleCallback(callback(id, 'offer:yes'), db);
@@ -188,6 +189,7 @@ test('oferta PDF can be read before and after consent without changing state or 
   const initial = { ...f.db.users['101'] };
   for (const profile of [
     initial,
+    { ...initial, additional_phone: undefined },
     { ...initial, step: 'receipt', offerAccepted: true, offerVersion: 'approved-offer-v2' },
     { ...initial, step: 'done', offerAccepted: true, offerVersion: 'pending-offer-v1' },
   ]) {
@@ -218,6 +220,7 @@ test('oferta callbacks require the completed profile owner in a private chat and
       { event: callback(999, 'offer:' + action) },
       { event: callback(101, 'offer:' + action), profile: { ...valid, step: 'name' } },
       { event: callback(101, 'offer:' + action), profile: { ...valid, step: 'phone' } },
+      { event: callback(101, 'offer:' + action), profile: { ...valid, step: 'additional_phone' } },
       ...(action === 'read' ? [] : ['receipt', 'done'].map(step => ({
         event: callback(101, 'offer:' + action), profile: { ...valid, step, offerAccepted: true, offerVersion: 'older-version' },
       }))),
@@ -238,6 +241,8 @@ for (const step of ['receipt', 'done']) {
     const f = fixture(t, { OFFER_DOC_PATH: true, OFFER_VERSION: 'approved-offer-v2' });
     await f.fill(); await f.consent();
     Object.assign(f.db.users['101'], { step, offerVersion: 'pending-offer-v1' });
+    delete f.db.users['101'].additional_phone;
+    delete f.db.registrations[0].additional_phone;
     f.db.registrations[0].offer_version = 'pending-offer-v1';
     f.bot.saveDb(f.db);
     const oldRegistration = JSON.stringify(f.db.registrations[0]);
@@ -260,12 +265,50 @@ for (const step of ['receipt', 'done']) {
     assert.equal(f.db.registrations[1].offer_version, 'approved-offer-v2');
     assert.equal(f.googleRequests().length, 1);
     assert.equal(f.googleRequests()[0].body.Oferta, 'Roziman');
+    assert.equal(f.googleRequests()[0].body['Telefon raqam'], '+998901234567');
     assert.equal(JSON.stringify(f.db.registrations[0]), oldRegistration);
     await f.consent();
     assert.equal(f.db.registrations.length, 2);
     assert.equal(f.googleRequests().length, 1, 'Repeated old accept buttons cannot create duplicate registrations');
   });
 }
+
+test('legacy one-phone users keep payment menus, receipt upload, and receipt deduplication', async t => {
+  const f = fixture(t);
+  await f.fill(); await f.consent();
+  delete f.db.users['101'].additional_phone;
+  delete f.db.registrations[0].additional_phone;
+  f.bot.saveDb(f.db);
+  f.requests.length = 0;
+  await f.bot.handleMessage(message(101, '/payment'), f.db);
+  await f.bot.handleCallback(callback(101, 'payment:menu'), f.db);
+  assert.equal(f.db.users['101'].step, 'receipt');
+  assert.equal(f.replies().filter(reply => reply.body.text === f.bot.paymentText()).length, 2);
+  assert.equal(f.googleRequests().length, 0);
+  const photo = { photo: [{ file_id: 'OFFLINE_LEGACY_PHOTO', file_unique_id: 'OFFLINE_LEGACY_UNIQUE', file_size: 6 }] };
+  await f.bot.handleMessage(message(101, '', photo), f.db);await f.bot.waitForBackground();
+  assert.equal(f.db.users['101'].step, 'done');
+  assert.equal(f.db.payments.length, 1);
+  assert.equal(f.googleRequests().length, 1);
+  assert.equal(f.googleRequests()[0].body['Telefon raqam'], '+998901234567');
+  await f.bot.handleMessage(message(101, '/payment'), f.db);
+  await f.bot.handleMessage(message(101, '', photo), f.db);await f.bot.waitForBackground();
+  assert.equal(f.db.payments.length, 1);assert.equal(f.googleRequests().length, 1);
+});
+
+test('historically registered offer profiles can renew consent without a secondary phone', async t => {
+  const f = fixture(t);
+  await f.fill(); await f.consent();
+  Object.assign(f.db.users['101'], { step: 'offer', offerAccepted: false });
+  delete f.db.users['101'].additional_phone;
+  delete f.db.registrations[0].additional_phone;
+  f.bot.saveDb(f.db);f.requests.length = 0;
+  await f.consent();
+  assert.equal(f.db.users['101'].step, 'receipt');
+  assert.equal(f.db.registrations.length, 2);
+  assert.equal(f.googleRequests().length, 1);
+  assert.equal(f.googleRequests()[0].body['Telefon raqam'], '+998901234567');
+});
 
 test('payment does not bypass incomplete identity data when renewing an old oferta', async t => {
   const f = fixture(t);

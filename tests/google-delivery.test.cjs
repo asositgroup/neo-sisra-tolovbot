@@ -64,6 +64,42 @@ test('both operations reject missing, stale-shaped or false consent before any r
   assert.equal(calls.length, 0);
 });
 
+test('registration and receipt include both phone numbers in the existing phone column only', async () => {
+  const additionalPhone = '+998951234567';
+  const { calls, delivery } = fakeDelivery();
+  await delivery.sendRegistration({ ...profile, additionalPhone });
+  await delivery.sendReceipt({ ...profile, additionalPhone }, receipt);
+  const legacy = fakeDelivery();
+  await legacy.delivery.sendRegistration(profile);
+  await legacy.delivery.sendReceipt(profile, receipt);
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.fields['Telefon raqam'], `${profile.phone} / ${additionalPhone}`);
+    assert.deepEqual(Object.keys(call.fields), Object.keys(legacy.calls[index].fields));
+  }
+});
+
+test('legacy profiles with absent or empty additional phone retain the primary number', async () => {
+  const { calls, delivery } = fakeDelivery();
+  for (const additionalPhone of [undefined, null, '']) {
+    await delivery.sendRegistration({ ...profile, additionalPhone });
+    await delivery.sendReceipt({ ...profile, additionalPhone }, receipt);
+  }
+  assert.equal(calls.length, 6);
+  for (const call of calls) assert.equal(call.fields['Telefon raqam'], profile.phone);
+});
+
+test('both operations reject malformed or duplicate additional phone before any request', async () => {
+  const { calls, delivery } = fakeDelivery();
+  for (const additionalPhone of ['  ', '951234567', '+998 95 1234567', '+012345678',
+    '+998951234567\n', '+1234567890123456', 998951234567, false, {}, profile.phone]) {
+    await assert.rejects(delivery.sendRegistration({ ...profile, additionalPhone }),
+      { code: 'INVALID_PROFILE' });
+    await assert.rejects(delivery.sendReceipt({ ...profile, additionalPhone }, receipt),
+      { code: 'INVALID_PROFILE' });
+  }
+  assert.equal(calls.length, 0);
+});
+
 test('both operations reject invalid contact data before any request', async () => {
   const { calls, delivery } = fakeDelivery();
   for (const change of [{ name: '' }, { name: 'a\nb' }, { name: 'a'.repeat(101) },
