@@ -123,6 +123,67 @@ test('a distinct valid second number is mandatory and may be a different personâ
   assert.equal(db.users['112'].additional_phone,'+998911234567');
   assert.equal(sheetRequests().length,0,'Both numbers must still wait for explicit consent');
 });
+test('screenshot phone retries explain the missing digits and continue after a complete secondary number',async()=>{
+  requests.length=0;const db=bot.loadDb();
+  await bot.handleMessage(msg(116,'/start'),db);await bot.handleMessage(msg(116,'qwer'),db);
+  await bot.handleMessage(msg(116,'998904564545'),db);
+  assert.equal(db.users['116'].step,'additional_phone');
+  assert.equal(db.users['116'].phone,'+998904564545');
+  const offerRequests=()=>requests.filter(request=>request.body?.reply_markup?.inline_keyboard?.some(row=>row.some(button=>button.callback_data==='offer:yes')));
+  for(const number of ['9983453434','+9983452343']) {
+    const requestCount=requests.length;
+    await bot.handleMessage(msg(116,number),db);
+    assert.equal(requests.length,requestCount+1,'An invalid number produces one useful correction');
+    const correction=requests.at(-1).body.text;
+    assert.match(correction,/\+998/);assert.match(correction,/\b7\b/);assert.match(correction,/\b9\b/);
+    assert.match(correction,/2\s+ta\s+raqam\s+yetishmayapti/);
+    assert.equal(db.users['116'].step,'additional_phone');
+    assert.equal(db.users['116'].additional_phone,undefined);
+    assert.equal(db.registrations.length,0);assert.equal(sheetRequests().length,0);assert.equal(offerRequests().length,0);
+  }
+  await bot.handleMessage(msg(116,'+998934534343'),db);
+  assert.equal(db.users['116'].step,'offer');
+  assert.equal(db.users['116'].additional_phone,'+998934534343');
+  assert.equal(offerRequests().length,1);assert.equal(sheetRequests().length,0);
+  const saved=readState({dataDir:testDirectory}).users['116'];
+  assert.equal(saved.phone,'+998904564545');assert.equal(saved.additional_phone,'+998934534343');assert.equal(saved.step,'offer');
+  await bot.handleCallback(cb(116,'offer:yes'),db);await bot.waitForBackground();
+  assert.equal(db.registrations.length,1);assert.equal(sheetRequests().length,1);
+  assert.equal(sheetRequests()[0].body['Telefon raqam'],'+998904564545 / +998934534343');
+});
+test('both phone steps accept local, international and spaced complete Uzbek numbers',async()=>{
+  const db=bot.loadDb();
+  for(const [index,primary,secondary] of [
+    [0,'901234567','911234567'],
+    [1,'998901234567','998911234567'],
+    [2,'+998901234567','+998911234567'],
+    [3,'+998 (90) 123-45-67','+998 (91) 123-45-67'],
+    [4,'90 123 45 67','91 123 45 67'],
+  ]) {
+    const id=120+index;requests.length=0;
+    await bot.handleMessage(msg(id,'/start'),db);await bot.handleMessage(msg(id,'Offline Person'),db);
+    await bot.handleMessage(msg(id,primary),db);
+    assert.equal(db.users[String(id)].step,'additional_phone',primary);
+    await bot.handleMessage(msg(id,secondary),db);
+    assert.equal(db.users[String(id)].step,'offer',secondary);
+    assert.equal(db.users[String(id)].phone,'+998901234567');assert.equal(db.users[String(id)].additional_phone,'+998911234567');
+    assert.equal(sheetRequests().length,0);
+  }
+});
+test('too many digits and letters remain invalid in both phone steps',async()=>{
+  const db=bot.loadDb();await bot.handleMessage(msg(117,'/start'),db);await bot.handleMessage(msg(117,'Offline Person'),db);
+  for(const step of ['phone','additional_phone']) {
+    for(const number of ['+9989012345678','+998901234567890123','abc901234567']) {
+      requests.length=0;await bot.handleMessage(msg(117,number),db);
+      assert.equal(db.users['117'].step,step);
+      assert.equal(requests.length,1);assert.equal(sheetRequests().length,0);
+      assert.match(requests[0].body.text,/raqam/);
+      if(number==='+9989012345678')assert.match(requests[0].body.text,/1\s+ta\s+raqam\s+ortiqcha/);
+    }
+    if(step==='phone')await bot.handleMessage(msg(117,'+998901234567'),db);
+  }
+  assert.equal(db.users['117'].additional_phone,undefined);assert.equal(db.registrations.length,0);
+});
 test('secondary phone step and both numbers survive restart, while start begins a fresh registration',async()=>{
   let db=bot.loadDb();
   await bot.handleMessage(msg(113,'/start'),db);await bot.handleMessage(msg(113,'Offline Person'),db);

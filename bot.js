@@ -289,6 +289,29 @@ function normalizePhone(text) {
   return raw.startsWith('+') && /^[1-9]\d{6,14}$/.test(digits) ? '+'+digits : null;
 }
 
+function phoneValidationMessage(value, additional = false) {
+  const raw = String(value || '').trim();
+  const heading = additional ? 'Qoʻshimcha telefon raqamini tekshiring.' : 'Telefon raqamini tekshiring.';
+  const example = 'Masalan: +998 90 123 45 67 yoki 90 123 45 67.';
+  if (!raw || !/^\+?[\d ()-]+$/.test(raw)) {
+    return [heading, 'Telefon raqamini toʻliq, harflarsiz yuboring.', example].join('\n');
+  }
+  const digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('998') || !raw.startsWith('+')) {
+    const hasCountryCode = digits.startsWith('998');
+    const count = digits.length - (hasCountryCode ? 3 : 0);
+    const difference = 9 - count;
+    const requirement = hasCountryCode
+      ? '+998 dan keyin 9 ta raqam boʻlishi kerak.'
+      : 'Oʻzbekiston raqami +998 kodisiz 9 ta raqamdan iborat boʻlishi kerak.';
+    const correction = difference > 0
+      ? `${difference} ta raqam yetishmayapti.`
+      : `${-difference} ta raqam ortiqcha.`;
+    return [heading, `${requirement} Siz ${count} ta kiritdingiz — ${correction}`, example].join('\n');
+  }
+  return [heading, 'Telefon raqamini + belgisi va mamlakat kodi bilan toʻliq yuboring.', example].join('\n');
+}
+
 function userKey(chatId) {
   return String(chatId);
 }
@@ -613,7 +636,9 @@ async function askPhone(chatId) {
     [
       "📱 <b>Telefon raqamingizni yuboring.</b>",
       '',
-      "Pastdagi tugma orqali yuborishingiz yoki +998 formatida yozishingiz mumkin.",
+      'Pastdagi tugma orqali yuboring yoki raqamni yozing.',
+      'Masalan: +998 90 123 45 67 yoki 90 123 45 67.',
+      '+998 dan keyin 9 ta raqam boʻlishi kerak.',
     ].join('\n'),
     keyboard([[{ text: '📱 Telefon raqamni yuborish', request_contact: true }]], true),
   );
@@ -627,7 +652,9 @@ async function askAdditionalPhone(chatId) {
   await sendHtml(chatId, [
     '📱 <b>Qoʻshimcha telefon raqamingizni kiriting.</b>',
     '',
-    'Siz bilan bogʻlanishimiz uchun yana bitta boshqa raqamni +998901234567 formatida yuboring.',
+    'Siz bilan bogʻlanishimiz uchun yana bitta boshqa telefon raqamini yuboring.',
+    'Masalan: +998 90 123 45 67 yoki 90 123 45 67.',
+    '+998 dan keyin 9 ta raqam boʻlishi kerak.',
   ].join('\n'), removeKeyboard());
 }
 
@@ -1074,12 +1101,12 @@ async function handleMessage(message,db) {
   if(profile.step==='phone') {
     if(message.contact?.user_id && message.contact.user_id!==message.from?.id) {await sendMessage(chatId,'Oʻzingizning telefon raqamingizni yuboring.');return;}
     const phone=normalizePhone(message.contact?.phone_number||text);
-    if(!phone) {await sendMessage(chatId,'Telefon raqamni +998901234567 formatida yuboring.');return;}
+    if(!phone) {await sendMessage(chatId,phoneValidationMessage(message.contact?.phone_number||text));return;}
     profile.phone=phone;profile.step='additional_phone';saveDb(db);await askAdditionalPhone(chatId);return;
   }
   if(profile.step==='additional_phone') {
     const phone=normalizePhone(message.contact?.phone_number||text);
-    if(!phone) {await sendMessage(chatId,'Qoʻshimcha telefon raqamni +998901234567 formatida yuboring.');return;}
+    if(!phone) {await sendMessage(chatId,phoneValidationMessage(message.contact?.phone_number||text,true));return;}
     if(phone===normalizePhone(profile.phone)) {await sendMessage(chatId,'Bu raqamni avval kiritdingiz. Qoʻshimcha aloqa uchun boshqa telefon raqamini kiriting.');return;}
     profile.additional_phone=phone;profile.step='offer';saveDb(db);await askOffer(chatId);return;
   }
