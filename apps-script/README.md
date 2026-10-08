@@ -45,19 +45,23 @@ changes worksheet structure, or overwrites formulas.
 5. From a trusted server/operator tool, POST JSON
    `{ "action": "phone_health", "secret": "<SERVER_SECRET>" }` and verify
    `ok: true` and `headersValid: true`. The health check does not expose rows.
-6. Seed verified payment-row mappings before enabling updates for payment-only
-   users. Then test a permitted account and read back its intended row.
+6. Seed verified legacy payment-row mappings for users without captured delivery
+   identities. New successful deliveries capture these identities automatically.
+   Then test a permitted account and read back its intended row.
 
 ## Matching existing rows
 
 Contacts use `Sheet1`, column E `Telegram ID`, matching the exact string ID.
 Column B is `Telefon (botda kiritilgan)`. The other columns remain unchanged.
 
-Payment sheets currently have no Telegram-ID column. Their rows must first be
-mapped by a trusted operator using bot database identity and exact live Sheet
-cell values. Never create mappings from an unverified name/phone submitted by
-a user. This project checks the fixed existing registration and receipt tab IDs
-in `phone-sync.gs`; another project must explicitly adapt these IDs and headers.
+Payment sheets currently have no Telegram-ID column. New successful registration
+and receipt deliveries capture their validated submitted fingerprints, which the
+authenticated bot passes to phone updates as `entries`. The backend verifies a
+unique matching row before saving its mapping. Legacy rows without captured
+identities require a trusted operator to match bot database identity to live Sheet
+cell values. Never create mappings from an unverified name/phone submitted by a
+user. This project checks the fixed existing registration and receipt tab IDs in
+`phone-sync.gs`; another project must explicitly adapt these IDs and headers.
 
 Authenticated seed request, up to 100 records per call:
 
@@ -84,16 +88,22 @@ reset previous revisions. Ambiguous, missing, or conflicting mappings fail.
 Rows are reidentified from their full fingerprint each time, so sorting the
 worksheet does not redirect an update to a different person.
 
-The existing export covers its existing users only. New registrations require
-an additive verified mapping refresh, or their Telegram ID must already exist
-in contacts. This backend does not invent an identity match or append a row for
-an unknown user. Such an update returns `ROW_NOT_FOUND` and must remain queued
-until mapping is resolved.
+The existing contacts export covers its existing users only. New deliveries can
+update payment rows without being in that export: the bot captures fingerprints
+only after Google confirms delivery and sends them in authenticated updates.
+The backend accepts recognized date/time display equivalents and Drive links to
+the same verified file, then preserves the actual matched Sheet values. Names
+and phone values still require exact matches. Legacy users without captured
+fingerprints or an existing mapping need an additive verified seed. Unmatched
+updates return `ROW_NOT_FOUND` and remain queued until mapping is resolved; this
+backend never guesses an identity or appends a contact row.
 
 ## Update contract and delivery
 
 `updatePhone` requires `secret`, string `telegramId`, E.164 `phone`, nullable
 E.164 `additionalPhone`, positive safe-integer `revision`, and ISO `updatedAt`.
+Optional `entries` contains up to 40 captured successful-delivery fingerprints;
+request validation and revision checks run before any automatic mapping changes.
 Both numbers, when present, are written to the existing phone cell separated by
 ` / `. With `both`, a contact-only or mapped-payment-only user is supported.
 

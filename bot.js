@@ -53,11 +53,11 @@ const telegramQueue = options.telegramQueue || createTelegramQueue({
   ratePerSecond: setting('TELEGRAM_MESSAGES_PER_SECOND', 28, 30),
   perChatMs: 1050, groupMs: 3100, concurrency: 16, maxPending: 500,
 });
-const google = options.google || createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL });
 const phoneUpdateEndpoint = (process.env.PHONE_UPDATE_SCRIPT_URL || '').trim();
 const phoneUpdateSecret = (process.env.PHONE_UPDATE_SECRET || '').trim();
 const phoneUpdater = options.phoneUpdater || (phoneUpdateEndpoint && phoneUpdateSecret
   ? createPhoneUpdater({ endpoint: phoneUpdateEndpoint, secret: phoneUpdateSecret }) : null);
+const google = options.google || createGoogleDelivery({ endpoint: GOOGLE_SCRIPT_URL, captureIdentity: Boolean(phoneUpdater) });
 const phoneRetryBaseMs = options.phoneRetryBaseMs || 1000;
 const phoneUpdateFlights = new Set();
 let phoneRetryTimer;
@@ -500,14 +500,41 @@ function schedulePhoneRetry(db) {
   }, delay);
   phoneRetryTimer.unref?.();
 }
+function phoneSheetIdentities(db, chatId) {
+  const seen = new Set(), entries = [];
+  for (const row of [...db.registrations, ...db.payments]) {
+    if (String(row.telegram_id) !== String(chatId) || row.status !== 'sent' || !row.sheet_identity) continue;
+    const serialized = JSON.stringify(row.sheet_identity);
+    if (seen.has(serialized)) continue;
+    seen.add(serialized);
+    entries.push(JSON.parse(serialized));
+  }
+  return entries;
+}
+function captureSheetIdentity(db, row, result) {
+  if (!phoneUpdater || row.sheet_identity || !result?.sheetIdentity) return;
+  // Google delivery constructs this fingerprint from the actual submitted form
+  // only after a successful ACK. Never reconstruct it from mutable contact data.
+  row.sheet_identity = JSON.parse(JSON.stringify(result.sheetIdentity));
+  const key = userKey(row.telegram_id);
+  const current = db.phone_updates?.[key];
+  if (!current) return;
+  // A row can finish after a correction was already sent or while an older
+  // snapshot is in flight. Give the expanded mapping a new version either way.
+  db.phone_updates[key] = { ...current, revision: Math.max(Date.now(), current.revision + 1),
+    status: 'pending', attempts: 0, retry_at: 0 };
+  delete db.phone_updates[key].synced_at;
+  delete db.phone_updates[key].error;
+}
 function pumpPhoneUpdates(db) {
   if (!phoneUpdater || backgroundStopping || phoneUpdatesClosed || storageFailure) return;
   stopPhoneRetryTimer();
   for (const [key, entry] of Object.entries(db.phone_updates || {})) {
     if (phoneUpdateFlights.size >= Math.min(deliveryWorkers, 2)) break;
     if (entry.status !== 'pending' || phoneUpdateFlights.has(key) || (Number(entry.retry_at) || 0) > Date.now()) continue;
+    const identities = phoneSheetIdentities(db, key);
     const snapshot = { telegramId: key, phone: entry.phone, additionalPhone: entry.additional_phone || null,
-      revision: entry.revision, updatedAt: entry.updated_at };
+      revision: entry.revision, updatedAt: entry.updated_at, ...(identities.length ? { entries: identities } : {}) };
     entry.status = 'sending';
     saveDb(db);
     phoneUpdateFlights.add(key);
@@ -643,8 +670,9 @@ async function deliverRegistration(db,row) {
   if (!claimDelivery(db, 'registrations', row)) return;
   registrationFlights.add(row.id);
   try {
-    await google.sendRegistration(profileFor(row));
+    const result = await google.sendRegistration(profileFor(row));
     row.status='sent'; row.google_result={ok:true};
+    captureSheetIdentity(db, row, result);
   } catch(error) {
     if (error.code === 'STATE_STORE_ERROR') throw error;
     row.status='failed'; row.google_result={ok:false,error:'Sheets yuborish tasdiqlanmadi'};
@@ -652,6 +680,7 @@ async function deliverRegistration(db,row) {
     console.error('Registration: '+safeError(error));
     try { await sendMessage(row.telegram_id,'Maʼlumotlaringiz saqlandi, lekin jadvalga yetkazilgani tasdiqlanmadi. 🔄 Qayta yuborish tugmasini bosishingiz mumkin.',retryKeyboard()); } catch(error) { console.error(safeError(error)); }
   } finally { saveDb(db); registrationFlights.delete(row.id); }
+  if (row.status === 'sent') pumpPhoneUpdates(db);
   if(!row.notified && NOTIFY_CHAT_ID) {
     row.notified=await notifyLeadChat('reg',row); saveDb(db);
   }
@@ -683,6 +712,7 @@ async function deliverPayment(db,row) {
     const result=await google.sendReceipt(profileFor(row),file);
     row.check_url=result.fileUrl; row.check_url_google=result.fileUrl;
     row.google_result={ok:true,fileUrl:result.fileUrl}; row.status='sent';
+    captureSheetIdentity(db, row, result);
     saveDb(db);
   } catch(error) {
     if (error.code === 'STATE_STORE_ERROR') throw error;
@@ -692,6 +722,7 @@ async function deliverPayment(db,row) {
     try { await sendMessage(row.telegram_id,row.status==='invalid'?'Chek faylining formati notoʻgʻri. PNG, JPG yoki PDF formatidagi boshqa faylni yuboring.':'Chek yetkazilgani tasdiqlanmadi. 🔄 Qayta yuborish tugmasini bosishingiz mumkin. Oldingi urinish yetib borgan boʻlsa, takroriy yozuv paydo boʻlishi mumkin.',row.status==='invalid'?undefined:retryKeyboard()); } catch(error) { console.error(safeError(error)); }
   } finally { paymentFlights.delete(row.id); }
   if(row.status==='sent') {
+    pumpPhoneUpdates(db);
     if(!row.notified && NOTIFY_CHAT_ID) { row.notified=await notifyLeadChat('pay',row,{[row.receipt.kind==='photo'?'photo':'document']:row.receipt.kind==='photo'?[{file_id:row.receipt.fileId,file_unique_id:row.receipt.uniqueId}]:{file_id:row.receipt.fileId,mime_type:row.receipt.mimeType,file_name:row.receipt.fileName}});saveDb(db); }
     try { await sendMessage(row.telegram_id,'✅ Chekingiz tekshirish uchun yuborildi. Natija boʻyicha siz bilan bogʻlanamiz.',paymentKeyboard(true)); } catch(error) { console.error(safeError(error)); }
   }

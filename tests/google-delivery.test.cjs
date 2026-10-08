@@ -246,3 +246,66 @@ test('untrusted endpoint and invalid timeout configuration are rejected without 
     assert.throws(() => createGoogleDelivery({ endpoint, timeoutMs }), { code: 'INVALID_CONFIGURATION' });
   }
 });
+
+test('identity capture preserves the exact registration values submitted to Google', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-08T18:20:30Z').valueOf() });
+  let submitted;
+  const delivery = createGoogleDelivery({ endpoint, captureIdentity: true,
+    fetchImpl: async (url, options) => {
+      submitted = Object.fromEntries(options.body);
+      return { ok: true, json: async () => success };
+    },
+  });
+  const result = await delivery.sendRegistration({ ...profile, additionalPhone: '+998911234567' });
+  assert.deepEqual(result, { ok: true, sheetIdentity: {
+    sheetId: 1596542810, name: submitted.Ism, originalPhone: submitted['Telefon raqam'],
+    date: submitted.Sana,
+  } });
+  assert.equal(result.sheetIdentity.name, 'Neo Sisra Test');
+  assert.equal(result.sheetIdentity.originalPhone, '+998901234567 / +998911234567');
+  assert.equal(result.sheetIdentity.date, '08.10.2026 23:20:30');
+  assert.equal(Object.isFrozen(result.sheetIdentity), true);
+});
+
+test('receipt identity captures submitted timestamps and raw Drive ACK URL while public link remains normalized', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-08T19:00:01Z').valueOf() });
+  const rawUrl = 'https://drive.google.com/uc?export=view&id=NEO_SISRA_TEST_RECEIPT';
+  let submitted;
+  const delivery = createGoogleDelivery({ endpoint, captureIdentity: true,
+    fetchImpl: async (url, options) => {
+      submitted = Object.fromEntries(options.body);
+      return { ok: true, json: async () => ({ ...success, fileUrl: rawUrl }) };
+    },
+  });
+  const result = await delivery.sendReceipt(profile, receipt);
+  assert.deepEqual(result, { fileUrl, sheetIdentity: {
+    sheetId: 0, name: submitted.Ism, originalPhone: submitted['Telefon raqam'],
+    date: '2026-10-09', time: '00:00:01', checkUrl: rawUrl,
+  } });
+  assert.equal(result.sheetIdentity.date, submitted.sana);
+  assert.equal(result.sheetIdentity.time, submitted.vaqt);
+  assert.equal(Object.isFrozen(result.sheetIdentity), true);
+});
+
+test('captured identity does not follow profile edits made during delivery', async () => {
+  let release;
+  const mutable = { ...profile };
+  const delivery = createGoogleDelivery({ endpoint, captureIdentity: true,
+    fetchImpl: () => new Promise(resolve => { release = resolve; }),
+  });
+  const pending = delivery.sendRegistration(mutable);
+  mutable.name = 'Changed Person';
+  mutable.phone = '+998971234567';
+  release({ ok: true, json: async () => success });
+  const result = await pending;
+  assert.equal(result.sheetIdentity.name, 'Neo Sisra Test');
+  assert.equal(result.sheetIdentity.originalPhone, profile.phone);
+});
+
+test('identity capture cannot return a receipt mapping when Google ACK is invalid', async () => {
+  const delivery = createGoogleDelivery({ endpoint, captureIdentity: true,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ result: 'success', fileUrl: 'https://example.com/private' }) }),
+  });
+  await assert.rejects(delivery.sendReceipt(profile, receipt), { code: 'DELIVERY_UNCONFIRMED' });
+  assert.throws(() => createGoogleDelivery({ endpoint, captureIdentity: 'true' }), { code: 'INVALID_CONFIGURATION' });
+});

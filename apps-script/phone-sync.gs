@@ -132,8 +132,70 @@ function phoneSyncEntry_(value) {
 }
 
 function phoneSyncFingerprint_(entry, includePhone) {
-  return JSON.stringify([entry.sheetId, entry.name, entry.date, entry.time, entry.checkUrl]
+  return JSON.stringify([entry.sheetId, entry.name, phoneSyncDateKey_(entry.date) || entry.date,
+    phoneSyncTimeKey_(entry.time) || entry.time, phoneSyncDriveId_(entry.checkUrl) || entry.checkUrl]
     .concat(includePhone ? [entry.originalPhone] : []));
+}
+
+function phoneSyncTimeKey_(text) {
+  var match = /^(\d{1,2}):([0-5]\d):([0-5]\d)$/.exec(text || '');
+  if (!match || Number(match[1]) > 23) return null;
+  return ('0' + match[1]).slice(-2) + ':' + match[2] + ':' + match[3];
+}
+
+function phoneSyncDateKey_(text) {
+  var match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{1,2}:[0-5]\d:[0-5]\d))?$/.exec(text || '');
+  var year, month, day, time;
+  if (match) {
+    year = match[1]; month = match[2]; day = match[3]; time = match[4];
+  } else {
+    match = /^(\d{2})\.(\d{2})\.(\d{4})(?: (\d{1,2}:[0-5]\d:[0-5]\d))?$/.exec(text || '');
+    if (!match) return null;
+    year = match[3]; month = match[2]; day = match[1]; time = match[4];
+  }
+  var date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (date.getUTCFullYear() !== Number(year) || date.getUTCMonth() + 1 !== Number(month) ||
+      date.getUTCDate() !== Number(day) || (time && !phoneSyncTimeKey_(time))) return null;
+  return year + '-' + month + '-' + day + (time ? ' ' + phoneSyncTimeKey_(time) : '');
+}
+
+function phoneSyncDriveId_(text) {
+  if (typeof text !== 'string') return null;
+  var path = /^https:\/\/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]{10,})\/(?:view|preview)(?:\?[^\s#]*)?$/.exec(text);
+  if (path) return path[1];
+  var query = /^https:\/\/drive\.google\.com\/(?:uc|open|thumbnail)\?([^\s#]+)$/.exec(text);
+  if (!query) return null;
+  var ids = query[1].split('&').filter(function (part) { return part.indexOf('id=') === 0; });
+  if (ids.length !== 1 || !/^id=[A-Za-z0-9_-]{10,}$/.test(ids[0])) return null;
+  return ids[0].slice(3);
+}
+
+function phoneSyncEquivalent_(left, right, normalizer) {
+  if (left === right) return true;
+  var leftKey = normalizer(left), rightKey = normalizer(right);
+  return leftKey !== null && rightKey !== null && leftKey === rightKey;
+}
+
+function phoneSyncResolveEntry_(table, entry) {
+  var matches = [];
+  table.rows.forEach(function (row, index) {
+    if (index === 0 || row[0] !== entry.name || row[1] !== entry.originalPhone) return;
+    if (entry.sheetId === 0 ?
+      !phoneSyncEquivalent_(row[4], entry.checkUrl, phoneSyncDriveId_) ||
+      !phoneSyncEquivalent_(row[5], entry.date, phoneSyncDateKey_) ||
+      !phoneSyncEquivalent_(row[6], entry.time, phoneSyncTimeKey_) :
+      !phoneSyncEquivalent_(row[4], entry.date, phoneSyncDateKey_)) return;
+    matches.push(index);
+  });
+  if (matches.length > 1) phoneSyncFail_('AMBIGUOUS_ROW');
+  if (matches.length === 0) phoneSyncFail_('ROW_NOT_FOUND');
+  var row = table.rows[matches[0]];
+  phoneSyncCell_(table.sheet, matches[0] + 1);
+  // Persist the verified Sheet display values, never a guessed row number or
+  // a normalization of its original phone/name. Subsequent updates stay exact.
+  return { sheetId: entry.sheetId, name: row[0], originalPhone: row[1], currentPhone: row[1],
+    date: entry.sheetId === 0 ? row[5] : row[4],
+    time: entry.sheetId === 0 ? row[6] : '', checkUrl: entry.sheetId === 0 ? row[4] : '' };
 }
 
 function phoneSyncPaymentRow_(table, entry, pendingPhones) {
@@ -179,7 +241,7 @@ function phoneSyncSeed_(properties, config, request) {
       if (owners[ownership] && owners[ownership] !== record.telegramId) phoneSyncFail_('SEED_CONFLICT');
       if (state.entries.some(function (existing) { return phoneSyncFingerprint_(existing, true) === fingerprint; })) return;
       if (!tables[entry.sheetId]) tables[entry.sheetId] = phoneSyncTable_(config.payments, entry.sheetId);
-      phoneSyncPaymentRow_(tables[entry.sheetId], entry, []);
+      entry = phoneSyncResolveEntry_(tables[entry.sheetId], entry);
       owners[ownership] = record.telegramId;
       state.entries.push(entry);
       count++;
@@ -196,13 +258,25 @@ function phoneSyncUpdate_(properties, config, request) {
       request.additionalPhone === request.phone || !Number.isSafeInteger(request.revision) ||
       request.revision < 1 || typeof request.updatedAt !== 'string' ||
       !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(request.updatedAt) ||
-      !Number.isFinite(Date.parse(request.updatedAt))) phoneSyncFail_('INVALID_REQUEST');
+      !Number.isFinite(Date.parse(request.updatedAt)) ||
+      (request.entries !== undefined && (!Array.isArray(request.entries) || request.entries.length > 40))) {
+    phoneSyncFail_('INVALID_REQUEST');
+  }
   var payload = JSON.stringify([request.phone, request.additionalPhone, request.updatedAt]);
   var state = phoneSyncState_(properties, request.telegramId);
   if (request.revision < state.revision) {
     return { result: 'error', ok: false, code: 'STALE_REVISION' };
   }
   if (request.revision === state.revision && payload !== state.payload) phoneSyncFail_('REVISION_CONFLICT');
+  if (request.entries !== undefined && request.entries.length) {
+    // Entries come only from the authenticated bot's captured successful append
+    // payload. Validate request/revision first, then resolve every new mapping
+    // under this same script lock. Stale requests may not change identity state.
+    phoneSyncSeed_(properties, config, {
+      records: [{ telegramId: request.telegramId, entries: request.entries }]
+    });
+    state = phoneSyncState_(properties, request.telegramId);
+  }
   var value = request.phone + (request.additionalPhone ? ' / ' + request.additionalPhone : '');
   var cells = [], tables = {};
   if (config.targets === 'contacts' || config.targets === 'both') {

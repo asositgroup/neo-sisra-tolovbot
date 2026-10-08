@@ -373,3 +373,95 @@ test('explicit phone update during fresh registration preserves the current step
   assert.equal(db.phone_updates['101'].phone, otherPhone);
   assert.equal(f.registrations.at(-1).phone, otherPhone);
 });
+
+test('enabled Google delivery captures immutable actual registration and receipt fingerprints for future corrections', async t => {
+  const f = fixture(t), submitted = [], fakeTelegram = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url) === process.env.GOOGLE_SCRIPT_URL) {
+      submitted.push(Object.fromEntries(options.body));
+      return Response.json({ result: 'success', fileUrl: 'https://drive.google.com/uc?id=OFFLINE_RECEIPT&export=view' });
+    }
+    return fakeTelegram(url, options);
+  };
+  const bot = f.open({ google: undefined }), db = bot.loadDb();
+  await bot.handleMessage(msg(301, '/start'), db);
+  await bot.handleMessage(msg(301, 'Offline New Person'), db);
+  await bot.handleMessage(msg(301, oldPhone), db);
+  await bot.handleMessage(msg(301, extraPhone), db);
+  await bot.handleCallback(cb(301), db);
+  await bot.waitForBackground();
+  assert.deepEqual(db.registrations[0].sheet_identity, {
+    sheetId: 1596542810, name: submitted[0].Ism, originalPhone: submitted[0]['Telefon raqam'], date: submitted[0].Sana,
+  });
+  await bot.handleMessage(msg(301, newPhone), db);
+  await bot.waitForBackground();
+  assert.deepEqual(f.corrections[0].entries, [db.registrations[0].sheet_identity]);
+  const firstRevision = db.phone_updates['301'].revision;
+  await bot.handleMessage(msg(301, '', { photo: [{ file_id: 'OFFLINE_FILE', file_unique_id: 'OFFLINE_UNIQUE', file_size: 6 }] }), db);
+  await bot.waitForBackground();
+  assert.deepEqual(db.payments[0].sheet_identity, {
+    sheetId: 0, name: submitted[1].Ism, originalPhone: submitted[1]['Telefon raqam'], date: submitted[1].sana,
+    time: submitted[1].vaqt, checkUrl: 'https://drive.google.com/uc?id=OFFLINE_RECEIPT&export=view',
+  });
+  assert.equal(db.payments[0].sheet_identity.originalPhone, `${newPhone} / ${extraPhone}`);
+  assert.ok(db.phone_updates['301'].revision > firstRevision, 'New successful receipt must refresh the already-sent correction mapping');
+  assert.equal(f.corrections.at(-1).entries.length, 2);
+  const originalFingerprint = JSON.stringify(db.registrations[0].sheet_identity);
+  await bot.handleMessage(msg(301, otherPhone), db);
+  await bot.waitForBackground();
+  assert.equal(JSON.stringify(db.registrations[0].sheet_identity), originalFingerprint);
+  assert.equal(db.registrations[0].phone, oldPhone);
+  assert.equal(db.registrations[0].latest_phone, otherPhone);
+  assert.equal(db.phone_updates['301'].status, 'sent');
+});
+
+test('late successful registration expands a correction with a higher revision while its older snapshot remains immutable', async t => {
+  const f = fixture(t), registrationGate = deferred(), updateGate = deferred();
+  const identity = { sheetId: 1596542810, name: 'Offline Person', originalPhone: `${oldPhone} / ${extraPhone}`, date: '08.10.2026 23:00:00' };
+  let registrationStarted = false;
+  const bot = f.open({ google: { sendRegistration: async () => {
+    registrationStarted = true; await registrationGate.promise; return { ok: true, sheetIdentity: identity };
+  }, sendReceipt: async () => { throw new Error('No receipt expected'); } } });
+  const db = registered(bot);
+  db.registrations.push({ ...db.registrations[0], id: 'new-registration', status: 'pending' }); bot.saveDb(db);
+  f.updater.updatePhone = async update => {
+    f.corrections.push(update);
+    if (f.corrections.length === 1) await updateGate.promise;
+    return { ok: true, revision: update.revision };
+  };
+  try {
+    bot.pumpDeliveries(db); await until(() => registrationStarted);
+    await bot.handleMessage(msg(101, newPhone), db);
+    await until(() => f.corrections.length === 1);
+    const first = f.corrections[0];
+    assert.equal(first.entries, undefined);
+    registrationGate.resolve();
+    await until(() => db.registrations[1].status === 'sent' && db.registrations[1].sheet_identity);
+    assert.ok(db.phone_updates['101'].revision > first.revision);
+    assert.equal(db.phone_updates['101'].status, 'pending');
+    assert.equal(first.entries, undefined, 'An in-flight request must not gain later mappings');
+    assert.equal(f.corrections.length, 1, 'The newer version waits for the same-chat flight');
+  } finally { registrationGate.resolve(); updateGate.resolve(); await bot.waitForBackground(); }
+  assert.equal(f.corrections.length, 2);
+  assert.deepEqual(f.corrections[1].entries, [identity]);
+  assert.equal(f.corrections[1].phone, newPhone);
+  assert.equal(db.phone_updates['101'].status, 'sent');
+  identity.originalPhone = otherPhone;
+  assert.equal(db.registrations[1].sheet_identity.originalPhone, `${oldPhone} / ${extraPhone}`, 'Persisted identity must not alias a delivery result');
+  assert.equal(f.corrections[1].entries[0].originalPhone, `${oldPhone} / ${extraPhone}`);
+});
+
+test('mapping snapshots only contain distinct acknowledged identities belonging to the correcting user', async t => {
+  const f = fixture(t), bot = f.open(), db = registered(bot);
+  const identity = { sheetId: 1596542810, name: 'Offline Person', originalPhone: `${oldPhone} / ${extraPhone}`, date: '08.10.2026 23:00:00' };
+  db.registrations[0].sheet_identity = identity;
+  db.registrations.push(
+    { ...db.registrations[0], id: 'duplicate-fingerprint' },
+    { ...db.registrations[0], id: 'other-user', telegram_id: 777, sheet_identity: { ...identity, name: 'Other Person' } },
+    { ...db.registrations[0], id: 'not-confirmed', status: 'failed', sheet_identity: { ...identity, date: '08.10.2026 23:01:00' } },
+  );
+  bot.saveDb(db);
+  await bot.handleMessage(msg(101, newPhone, { sheet_identity: { ...identity, name: 'Untrusted message field' } }), db);
+  await bot.waitForBackground();
+  assert.deepEqual(f.corrections[0].entries, [identity]);
+});

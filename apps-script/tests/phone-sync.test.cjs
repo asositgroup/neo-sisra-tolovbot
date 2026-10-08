@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { createPhoneUpdater } = require('../../google-delivery.cjs');
+const { createGoogleDelivery, createPhoneUpdater } = require('../../google-delivery.cjs');
 
 const source = fs.readFileSync(path.join(__dirname, '../phone-sync.gs'), 'utf8');
 const SECRET = 'local-test-secret-not-a-real-secret';
@@ -341,4 +341,156 @@ test('real phone updater accepts Apps Script ACKs, including same-revision repai
   await assert.rejects(updater.updatePhone(snapshot), { code: 'PHONE_UPDATE_UNCONFIRMED' });
   assert.equal(h.receipts.rows[1][1], SECOND_PHONE);
   assert.equal(calls.length, 4);
+});
+
+test('Apps Script new user can self-seed verified successful append identity without a contacts row', () => {
+  const h = harness();
+  h.contacts.rows.splice(1, 1);
+  assert.equal(h.properties.has('PHONE_SYNC_USER_' + ID), false);
+  assert.deepEqual(h.update({ entries: [registration] }), {
+    result: 'success', ok: true, updated: true, telegramId: ID, revision: 1, matchedRows: 1,
+  });
+  assert.equal(h.state().entries.length, 1);
+  assert.equal(h.state().entries[0].originalPhone, OLD_PHONE);
+  assert.equal(h.registrations.rows[1][1], NEW_PHONE);
+  assert.equal(h.contacts.rows.length, 2, 'must not add contact rows');
+  assert.equal(h.update({ entries: [registration] }).ok, true, 'retry does not rematch an obsolete original phone');
+});
+
+test('Apps Script new receipt identity accepts recognized date/time and same Drive file ID only', () => {
+  const h = harness('payments');
+  const fileId = 'VERIFIED_TEST_DRIVE_FILE_ID';
+  h.registrations.rows[1][4] = '2026-10-05 13:20:01';
+  h.receipts.rows[1][4] = `https://drive.google.com/uc?export=view&id=${fileId}`;
+  h.receipts.rows[1][5] = '05.10.2026';
+  h.receipts.rows[1][6] = '3:30:01';
+  const entries = [registration, { ...receipt,
+    checkUrl: `https://drive.google.com/file/d/${fileId}/view`, time: '03:30:01' }];
+  assert.equal(h.update({ entries }).matchedRows, 2);
+  const state = h.state();
+  assert.equal(state.entries[0].date, '2026-10-05 13:20:01');
+  assert.equal(state.entries[1].checkUrl, h.receipts.rows[1][4]);
+  assert.equal(state.entries[1].date, '05.10.2026');
+  assert.equal(state.entries[1].time, '3:30:01');
+  assert.equal(state.entries[1].originalPhone, OLD_PHONE);
+  assert.equal(h.update({ revision: 2, phone: SECOND_PHONE, entries }).matchedRows, 2);
+  assert.equal(h.state().entries.length, 2, 'equivalent repeated identities do not duplicate stored entries');
+});
+
+test('Apps Script trusted inline seed still refuses fuzzy identities and spoofed receipt URLs', () => {
+  const fileId = 'VERIFIED_TEST_DRIVE_FILE_ID';
+  for (const bad of [
+    { name: 'Test Person ' }, { originalPhone: OLD_PHONE.slice(1) }, { date: '10/05/2026' },
+    { date: '2026-10-06' }, { time: '13:30' }, { time: '13:30:02' },
+    { checkUrl: `https://drive.google.com.evil.invalid/file/d/${fileId}/view` },
+    { checkUrl: `https://drive.google.com/uc?id=${fileId}&id=${fileId}` },
+    { checkUrl: 'https://drive.google.com/file/d/OTHER_TEST_DRIVE_FILE_ID/view' },
+  ]) {
+    const h = harness('payments');
+    h.receipts.rows[1][4] = `https://drive.google.com/uc?export=view&id=${fileId}`;
+    const candidate = { ...receipt, checkUrl: `https://drive.google.com/file/d/${fileId}/view`, ...bad };
+    assert.equal(h.update({ entries: [candidate] }).code, 'ROW_NOT_FOUND');
+    assert.equal(h.properties.has('PHONE_SYNC_USER_' + ID), false);
+    assert.equal(h.receipts.rows[1][1], OLD_PHONE);
+  }
+});
+
+test('Apps Script invalid or stale updates cannot mutate identity mappings', () => {
+  const h = harness();
+  h.seed([{ telegramId: ID, entries: [registration] }]);
+  assert.equal(h.update({ revision: 2 }).ok, true);
+  const before = h.properties.get('PHONE_SYNC_USER_' + ID);
+  for (const invalid of [
+    { phone: 'bad' }, { revision: 0 }, { updatedAt: 'invalid' }, { secret: 'wrong' },
+    { entries: 'not an array' }, { entries: Array(41).fill(receipt) },
+  ]) {
+    assert.equal(h.update({ revision: 3, entries: [receipt], ...invalid }).ok, false);
+    assert.equal(h.properties.get('PHONE_SYNC_USER_' + ID), before);
+  }
+  assert.equal(h.update({ revision: 1, entries: [receipt] }).code, 'STALE_REVISION');
+  assert.equal(h.properties.get('PHONE_SYNC_USER_' + ID), before);
+  assert.equal(h.receipts.rows[1][1], OLD_PHONE);
+  assert.equal(h.update({ revision: 2, entries: [receipt] }).matchedRows, 3);
+  assert.equal(h.receipts.rows[1][1], NEW_PHONE, 'current revision may repair a newly appended receipt');
+});
+
+test('Apps Script inline seeding protects global identity ownership across equivalent date formats', () => {
+  const h = harness('payments');
+  h.seed([{ telegramId: '42', entries: [registration] }]);
+  const equivalent = { ...registration, date: '2026-10-05 13:20:01' };
+  assert.equal(h.update({ entries: [equivalent] }).code, 'SEED_CONFLICT');
+  assert.equal(h.properties.has('PHONE_SYNC_USER_' + ID), false);
+  assert.equal(h.registrations.rows[1][1], OLD_PHONE);
+});
+
+test('Apps Script equivalent duplicate rows and invalid later entries make seeding atomic and fail closed', () => {
+  const h = harness('payments');
+  h.registrations.rows.push([...h.registrations.rows[1]]);
+  h.registrations.rows.at(-1)[4] = '2026-10-05 13:20:01';
+  assert.equal(h.update({ entries: [registration] }).code, 'AMBIGUOUS_ROW');
+  assert.equal(h.properties.has('PHONE_SYNC_USER_' + ID), false);
+  const invalid = harness('payments');
+  assert.equal(invalid.update({ entries: [registration, { ...receipt, sheetId: 123 }] }).code, 'INVALID_SEED');
+  assert.equal(invalid.properties.has('PHONE_SYNC_USER_' + ID), false);
+  assert.equal(invalid.events.filter(event => event[0] === 'write').length, 0);
+});
+
+test('real phone updater bridges a new user through captured append identity without operator seeding', async () => {
+  const h = harness('payments');
+  const updater = createPhoneUpdater({
+    endpoint: 'https://script.google.com/macros/s/PHONE_SYNC_TEST_ONLY/exec', secret: SECRET,
+    fetchImpl: async (url, options) => ({ ok: true, json: async () => h.dispatch(JSON.parse(options.body)) }),
+  });
+  const snapshot = { telegramId: ID, phone: NEW_PHONE, additionalPhone: null,
+    revision: 1, updatedAt: '2026-10-08T17:00:00.000Z', entries: [registration] };
+  assert.deepEqual(await updater.updatePhone(snapshot), {
+    ok: true, telegramId: ID, revision: 1, matchedRows: 1,
+  });
+  assert.equal(h.registrations.rows[1][1], NEW_PHONE);
+  assert.deepEqual(await updater.updatePhone({ ...snapshot, revision: 2, phone: SECOND_PHONE }), {
+    ok: true, telegramId: ID, revision: 2, matchedRows: 1,
+  });
+  assert.equal(h.registrations.rows[1][1], SECOND_PHONE);
+});
+
+test('captured real registration and receipt delivery identities bridge into automatic backend mapping', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-08T22:04:05Z').valueOf() });
+  const h = harness('payments');
+  const fileId = 'CAPTURED_RECEIPT_DRIVE_TEST_ID';
+  const endpoint = 'https://script.google.com/macros/s/PHONE_SYNC_TEST_ONLY/exec';
+  const delivery = createGoogleDelivery({ endpoint, captureIdentity: true,
+    fetchImpl: async (url, options) => {
+      const form = Object.fromEntries(options.body);
+      if (form.imageUpload === 'true') {
+        h.receipts.rows[1] = [form.Ism, form['Telefon raqam'], form.Tarif, form.Offerta,
+          `https://drive.google.com/uc?export=view&id=${fileId}`,
+          form.sana.split('-').reverse().join('.'), form.vaqt.replace(/^0/, '')];
+      } else {
+        h.registrations.rows[1] = [form.Ism, form['Telefon raqam'], form.Tarif, form.Oferta, form.Sana];
+      }
+      return { ok: true, json: async () => ({ result: 'success',
+        fileUrl: `https://drive.google.com/file/d/${fileId}/view` }) };
+    },
+  });
+  const profile = { name: 'Test Person', phone: OLD_PHONE, additionalPhone: SECOND_PHONE,
+    telegramId: ID, offerAccepted: true, offerVersion: 'test-version' };
+  const registered = await delivery.sendRegistration(profile);
+  const sentReceipt = await delivery.sendReceipt(profile, {
+    bytes: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=', 'base64'),
+    fileName: 'test.png', mimeType: 'image/png',
+  });
+  const updater = createPhoneUpdater({ endpoint, secret: SECRET,
+    fetchImpl: async (url, options) => ({ ok: true, json: async () => h.dispatch(JSON.parse(options.body)) }),
+  });
+  const snapshot = { telegramId: ID, phone: NEW_PHONE, additionalPhone: SECOND_PHONE,
+    revision: 1, updatedAt: '2026-10-08T22:05:00.000Z',
+    entries: [registered.sheetIdentity, sentReceipt.sheetIdentity] };
+  assert.deepEqual(await updater.updatePhone(snapshot), {
+    ok: true, telegramId: ID, revision: 1, matchedRows: 2,
+  });
+  assert.equal(h.state().entries.length, 2);
+  assert.equal(h.state().entries[1].time, '3:04:05');
+  assert.equal(h.state().entries[1].date, '09.10.2026');
+  assert.equal(h.state().entries[1].originalPhone, OLD_PHONE + ' / ' + SECOND_PHONE);
+  assert.equal(h.receipts.rows[1][1], NEW_PHONE + ' / ' + SECOND_PHONE);
 });

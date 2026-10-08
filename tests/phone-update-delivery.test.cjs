@@ -179,3 +179,68 @@ test('only a trusted Apps Script exec endpoint and a sufficiently long secret ar
     });
   }
 });
+
+const signupEntry = Object.freeze({ sheetId: 1596542810, name: 'Test Person',
+  originalPhone: '+998901234567 / +998911234567', date: '08.10.2026 23:20:30' });
+const receiptEntry = Object.freeze({ sheetId: 0, name: 'Test Person',
+  originalPhone: '+998901234567', date: '2026-10-08', time: '23:25:01',
+  checkUrl: 'https://drive.google.com/uc?export=view&id=TEST_PHONE_RECEIPT' });
+
+test('phone updates may attach exact trusted receipt and registration identities without changing default payload', async () => {
+  const { updater, calls } = fakeUpdater();
+  await updater.updatePhone({ ...input, entries: [signupEntry, receiptEntry] });
+  assert.deepEqual(calls[0].payload, { action: 'updatePhone', secret, ...input,
+    entries: [signupEntry, receiptEntry] });
+  await updater.updatePhone(input);
+  assert.equal(Object.hasOwn(calls[1].payload, 'entries'), false);
+  await updater.updatePhone({ ...input, entries: [] });
+  assert.deepEqual(calls[2].payload.entries, []);
+});
+
+test('phone-update entry snapshot is independent of subsequent list and entry mutation', async () => {
+  let release;
+  let body;
+  const updater = createPhoneUpdater({ endpoint, secret, fetchImpl: async (url, options) => {
+    body = options.body;
+    return new Promise(resolve => { release = resolve; });
+  } });
+  const entries = [{ ...signupEntry }, { ...receiptEntry }];
+  const pending = updater.updatePhone({ ...input, entries });
+  entries[0].name = 'Another Person';
+  entries[1].checkUrl = 'https://example.com/wrong';
+  entries.push({ ...signupEntry, name: 'Unexpected' });
+  release({ ok: true, json: async () => success });
+  await pending;
+  assert.deepEqual(JSON.parse(body).entries, [signupEntry, receiptEntry]);
+});
+
+test('invalid identity descriptors cannot redirect an update or send malformed mapping data', async () => {
+  const { updater, calls } = fakeUpdater();
+  const invalid = [null, {}, '[]', [null], new Array(1), Array.from({ length: 41 }, () => signupEntry),
+    [{ ...signupEntry, sheetId: 123 }], [{ ...signupEntry, sheetId: '1596542810' }],
+    [{ ...signupEntry, spreadsheetId: 'UNRELATED_DOCUMENT' }], [{ ...signupEntry, name: '' }],
+    [{ ...signupEntry, name: 'a'.repeat(101) }], [{ ...signupEntry, name: 'a\nb' }],
+    [{ ...signupEntry, originalPhone: '998901234567' }],
+    [{ ...signupEntry, originalPhone: '+9983453434' }],
+    [{ ...signupEntry, originalPhone: '+998901234567 / +998901234567' }],
+    [{ ...signupEntry, originalPhone: '+998901234567 / +998911234567 / +998921234567' }],
+    [{ ...signupEntry, date: '30.02.2026 23:20:30' }], [{ ...signupEntry, date: '08.10.2026 25:00:00' }],
+    [{ ...signupEntry, date: 'anything' }], [{ ...receiptEntry, date: '2026-02-30' }],
+    [{ ...receiptEntry, time: '24:00:00' }], [{ ...receiptEntry, time: '23:60:00' }],
+    [{ ...receiptEntry, checkUrl: 'https://example.com/receipt' }],
+    [{ ...receiptEntry, checkUrl: 'https://user:secret@drive.google.com/file/d/id/view' }],
+    [{ ...receiptEntry, checkUrl: 'https://drive.google.com:444/file/d/id/view' }],
+    [{ ...receiptEntry, checkUrl: '' }],
+  ];
+  for (const entries of invalid) {
+    await assert.rejects(updater.updatePhone({ ...input, entries }), { code: 'INVALID_PHONE_UPDATE' });
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('forty authoritative identities are accepted without silently dropping any', async () => {
+  const { updater, calls } = fakeUpdater();
+  const entries = Array.from({ length: 40 }, (_, index) => ({ ...signupEntry, name: `Test Person ${index}` }));
+  await updater.updatePhone({ ...input, entries });
+  assert.deepEqual(calls[0].payload.entries, entries);
+});

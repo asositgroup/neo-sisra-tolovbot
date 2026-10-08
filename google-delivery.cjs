@@ -114,18 +114,26 @@ function validFileUrl(value) {
   }
 }
 
-function createGoogleDelivery({ endpoint, fetchImpl = globalThis.fetch, timeoutMs } = {}) {
+function createGoogleDelivery({ endpoint, fetchImpl = globalThis.fetch, timeoutMs, captureIdentity = false } = {}) {
   let parsed;
   try { parsed = new URL(endpoint); } catch { /* Report only the safe configuration error. */ }
   if (!parsed || parsed.protocol !== 'https:' || parsed.hostname !== 'script.google.com' ||
       parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash ||
       !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(parsed.pathname) ||
-      typeof fetchImpl !== 'function' || (timeoutMs !== undefined &&
+      typeof fetchImpl !== 'function' || typeof captureIdentity !== 'boolean' || (timeoutMs !== undefined &&
       (!Number.isFinite(timeoutMs) || timeoutMs <= 0))) {
     throw failure('INVALID_CONFIGURATION', 'Google delivery configuration is invalid.');
   }
 
   async function send(form, expectsFile) {
+    // Capture the submitted values, not profile fields that may change while
+    // Google is handling this request or locally generated delivery timestamps.
+    const identity = captureIdentity ? {
+      sheetId: expectsFile ? 0 : 1596542810,
+      name: form.get('Ism'), originalPhone: form.get('Telefon raqam'),
+      date: form.get(expectsFile ? 'sana' : 'Sana'),
+      ...(expectsFile ? { time: form.get('vaqt') } : {}),
+    } : null;
     const controller = new AbortController();
     let expired = false;
     let timer;
@@ -144,10 +152,13 @@ function createGoogleDelivery({ endpoint, fetchImpl = globalThis.fetch, timeoutM
         if (response?.ok !== true) throw new Error('http');
         const result = await response.json();
         if (!result || result.result !== 'success') throw new Error('acknowledgement');
-        if (!expectsFile) return { ok: true };
+        if (!expectsFile) return { ok: true,
+          ...(identity ? { sheetIdentity: Object.freeze(identity) } : {}) };
         const fileUrl = validFileUrl(result.fileUrl);
         if (!fileUrl) throw new Error('receipt-url');
-        return { fileUrl };
+        return { fileUrl, ...(identity ? {
+          sheetIdentity: Object.freeze({ ...identity, checkUrl: result.fileUrl }),
+        } : {}) };
       })();
       return await Promise.race([delivery, deadline]);
     } catch {
@@ -170,6 +181,45 @@ function createGoogleDelivery({ endpoint, fetchImpl = globalThis.fetch, timeoutM
   });
 }
 
+function phoneUpdateEntries(entries) {
+  if (!Array.isArray(entries) || entries.length > 40) {
+    throw failure('INVALID_PHONE_UPDATE', 'Phone update data is invalid.');
+  }
+  return Object.freeze(Array.from(entries, entry => {
+    const receipt = entry?.sheetId === 0;
+    const allowed = receipt
+      ? ['sheetId', 'name', 'originalPhone', 'date', 'time', 'checkUrl']
+      : ['sheetId', 'name', 'originalPhone', 'date'];
+    const phones = typeof entry?.originalPhone === 'string' ? entry.originalPhone.split(' / ') : [];
+    const validPhones = phones.length >= 1 && phones.length <= 2 &&
+      phones.every(phone => /^\+[1-9]\d{6,14}$/.test(phone) &&
+        (!phone.startsWith('+998') || /^\+998\d{9}$/.test(phone))) &&
+      (phones.length < 2 || phones[0] !== phones[1]);
+    const date = typeof entry?.date === 'string' ? entry.date : '';
+    const match = receipt ? date.match(/^(\d{4})-(\d{2})-(\d{2})$/) :
+      date.match(/^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+    const year = Number(match?.[receipt ? 1 : 3]);
+    const month = Number(match?.[2]);
+    const day = Number(match?.[receipt ? 3 : 1]);
+    const calendar = new Date(Date.UTC(year, month - 1, day));
+    const validDate = Boolean(match) && calendar.getUTCFullYear() === year &&
+      calendar.getUTCMonth() === month - 1 && calendar.getUTCDate() === day;
+    const time = receipt ? entry?.time : match ? `${match[4]}:${match[5]}:${match[6] || '00'}` : '';
+    if (!entry || ![0, 1596542810].includes(entry.sheetId) ||
+        Object.keys(entry).some(key => !allowed.includes(key)) ||
+        typeof entry.name !== 'string' || !entry.name.trim() || entry.name.length > 100 ||
+        /[\u0000-\u001f\u007f]/.test(entry.name) || !validPhones || !validDate ||
+        typeof time !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(time) ||
+        (receipt && !validFileUrl(entry.checkUrl))) {
+      throw failure('INVALID_PHONE_UPDATE', 'Phone update data is invalid.');
+    }
+    return Object.freeze({ sheetId: entry.sheetId, name: entry.name,
+      originalPhone: entry.originalPhone, date: entry.date,
+      ...(receipt ? { time: entry.time, checkUrl: entry.checkUrl } : {}),
+    });
+  }));
+}
+
 function phoneUpdateSnapshot(input) {
   const telegramId = typeof input?.telegramId === 'number'
     ? String(input.telegramId) : input?.telegramId;
@@ -190,7 +240,9 @@ function phoneUpdateSnapshot(input) {
       !Number.isSafeInteger(revision) || revision < 1 || !validDate) {
     throw failure('INVALID_PHONE_UPDATE', 'Phone update data is invalid.');
   }
-  return Object.freeze({ telegramId, phone, additionalPhone, revision, updatedAt });
+  return Object.freeze({ telegramId, phone, additionalPhone, revision, updatedAt,
+    ...(input?.entries !== undefined ? { entries: phoneUpdateEntries(input.entries) } : {}),
+  });
 }
 
 function createPhoneUpdater({ endpoint, secret, fetchImpl = globalThis.fetch, timeoutMs } = {}) {
