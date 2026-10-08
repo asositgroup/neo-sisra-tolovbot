@@ -263,8 +263,9 @@ test('Apps Script repeated updates reidentify latest stored phone with original 
   assert.equal(h.update({ revision: 2, phone: SECOND_PHONE }).ok, true);
   assert.equal(h.registrations.rows[1][1], SECOND_PHONE);
   h.receipts.rows[1][6] = '13:30:02';
-  assert.equal(h.update({ revision: 3 }).code, 'ROW_NOT_FOUND');
-  assert.equal(h.contacts.rows[1][1], SECOND_PHONE);
+  assert.equal(h.update({ revision: 3 }).matchedRows, 2);
+  assert.equal(h.contacts.rows[1][1], NEW_PHONE);
+  assert.equal(h.receipts.rows[1][1], SECOND_PHONE, 'changed fingerprint is skipped without guessing a match');
 });
 
 test('Apps Script seeding is additive and idempotent without resetting revisions', () => {
@@ -493,4 +494,69 @@ test('captured real registration and receipt delivery identities bridge into aut
   assert.equal(h.state().entries[1].date, '09.10.2026');
   assert.equal(h.state().entries[1].originalPhone, OLD_PHONE + ' / ' + SECOND_PHONE);
   assert.equal(h.receipts.rows[1][1], NEW_PHONE + ' / ' + SECOND_PHONE);
+});
+
+test('Apps Script skips deleted existing mappings while updating verified remaining destinations', () => {
+  const h = harness();
+  h.seed();
+  const deleted = h.registrations.rows.splice(1, 1)[0];
+  assert.equal(h.update().matchedRows, 2);
+  assert.equal(h.contacts.rows[1][1], NEW_PHONE);
+  assert.equal(h.receipts.rows[1][1], NEW_PHONE);
+  const state = h.state();
+  assert.equal(state.entries[0].originalPhone, OLD_PHONE);
+  assert.equal(state.entries[0].currentPhone, OLD_PHONE);
+  assert.equal(state.entries[1].currentPhone, NEW_PHONE);
+  assert.deepEqual(state.pendingPhones, [NEW_PHONE]);
+  h.registrations.rows.push(deleted);
+  assert.equal(h.update().matchedRows, 3, 'same revision repairs a restored original row');
+  assert.equal(h.registrations.rows.at(-1)[1], NEW_PHONE);
+  assert.deepEqual(h.state().pendingPhones, []);
+});
+
+test('Apps Script all missing destinations fail without committing or writing any cell', () => {
+  const h = harness('payments');
+  h.seed();
+  const before = h.properties.get('PHONE_SYNC_USER_' + ID);
+  h.registrations.rows.splice(1, 1);
+  h.receipts.rows.splice(1, 1);
+  assert.equal(h.update().code, 'ROW_NOT_FOUND');
+  assert.equal(h.properties.get('PHONE_SYNC_USER_' + ID), before);
+  assert.equal(h.events.filter(event => event[0] === 'write').length, 0);
+});
+
+test('Apps Script ambiguous remaining mapping still aborts even if another mapped row is missing', () => {
+  const h = harness();
+  h.seed();
+  h.registrations.rows.splice(1, 1);
+  h.receipts.rows.push([...h.receipts.rows[1]]);
+  assert.equal(h.update().code, 'AMBIGUOUS_ROW');
+  assert.equal(h.contacts.rows[1][1], OLD_PHONE);
+  assert.equal(h.events.filter(event => event[0] === 'write').length, 0);
+});
+
+test('Apps Script preserves pending values for missing rows after a partial-write retry', () => {
+  const h = harness();
+  h.seed();
+  h.setFailWrite(3);
+  assert.equal(h.update().code, 'RETRY_REQUIRED');
+  const deleted = h.registrations.rows.splice(1, 1)[0];
+  assert.equal(deleted[1], NEW_PHONE, 'the removed row already received the interrupted revision');
+  assert.equal(h.update({ revision: 2, phone: SECOND_PHONE }).matchedRows, 2);
+  assert.equal(h.state().entries[0].currentPhone, OLD_PHONE);
+  assert.deepEqual(h.state().pendingPhones, [NEW_PHONE, SECOND_PHONE]);
+  h.registrations.rows.push(deleted);
+  assert.equal(h.update({ revision: 2, phone: SECOND_PHONE }).matchedRows, 3);
+  assert.equal(h.registrations.rows.at(-1)[1], SECOND_PHONE);
+  assert.deepEqual(h.state().pendingPhones, []);
+});
+
+test('Apps Script newly supplied identity still fails strictly when no row verifies it', () => {
+  const h = harness();
+  h.seed([{ telegramId: ID, entries: [registration] }]);
+  h.receipts.rows.splice(1, 1);
+  assert.equal(h.update({ entries: [receipt] }).code, 'ROW_NOT_FOUND');
+  assert.equal(h.contacts.rows[1][1], OLD_PHONE);
+  assert.equal(h.registrations.rows[1][1], OLD_PHONE);
+  assert.equal(h.state().entries.length, 1);
 });

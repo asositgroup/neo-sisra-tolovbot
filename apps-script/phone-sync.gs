@@ -278,7 +278,7 @@ function phoneSyncUpdate_(properties, config, request) {
     state = phoneSyncState_(properties, request.telegramId);
   }
   var value = request.phone + (request.additionalPhone ? ' / ' + request.additionalPhone : '');
-  var cells = [], tables = {};
+  var cells = [], tables = {}, matchedEntries = [], missingEntries = false;
   if (config.targets === 'contacts' || config.targets === 'both') {
     var contacts = phoneSyncTable_(config.contacts, 'contacts');
     var matches = [];
@@ -291,7 +291,15 @@ function phoneSyncUpdate_(properties, config, request) {
   if (config.targets === 'payments' || config.targets === 'both') {
     state.entries.forEach(function (entry) {
       if (!tables[entry.sheetId]) tables[entry.sheetId] = phoneSyncTable_(config.payments, entry.sheetId);
-      cells.push(phoneSyncPaymentRow_(tables[entry.sheetId], entry, state.pendingPhones));
+      try {
+        cells.push(phoneSyncPaymentRow_(tables[entry.sheetId], entry, state.pendingPhones));
+        matchedEntries.push(entry);
+      } catch (error) {
+        if (!error || error.message !== 'ROW_NOT_FOUND') throw error;
+        // Existing verified rows may have been removed externally. Continue
+        // only when another verified destination remains; never guess a row.
+        missingEntries = true;
+      }
     });
   }
   if (!cells.length) phoneSyncFail_('ROW_NOT_FOUND');
@@ -305,8 +313,10 @@ function phoneSyncUpdate_(properties, config, request) {
   cells.forEach(function (cell) { cell.setValue(value); });
   SpreadsheetApp.flush();
   if (config.targets === 'payments' || config.targets === 'both') {
-    state.entries.forEach(function (entry) { entry.currentPhone = value; });
-    state.pendingPhones = [];
+    matchedEntries.forEach(function (entry) { entry.currentPhone = value; });
+    // A missing row can reappear with a value written before an interrupted
+    // request. Keep its original/current fingerprint and recovery phone values.
+    if (!missingEntries) state.pendingPhones = [];
   }
   state.status = 'committed';
   state.matchedRows = cells.length;

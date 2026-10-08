@@ -87,6 +87,10 @@ their verified numeric `sheetId`. Seeding is additive and idempotent; it does no
 reset previous revisions. Ambiguous, missing, or conflicting mappings fail.
 Rows are reidentified from their full fingerprint each time, so sorting the
 worksheet does not redirect an update to a different person.
+Previously mapped rows that were deleted externally are skipped only when other
+verified destinations remain. Their saved identity and recovery values are kept
+for a possible return; ambiguous rows, formulas, and newly supplied unmatched
+identities still fail. If every destination is missing, the update fails.
 
 The existing contacts export covers its existing users only. New deliveries can
 update payment rows without being in that export: the bot captures fingerprints
