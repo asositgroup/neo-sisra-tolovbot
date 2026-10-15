@@ -6,7 +6,7 @@ React/Vite interfeys `admin/` ichida. Productionda uning tayyor natijasi `admin-
 
 ## Xabarga ixtiyoriy tugma qo‘shish
 
-“Tugma qo‘shish” ni yoqing, tugma nomi va to‘liq HTTPS havolasini kiriting. Masalan, nomi “👤 Admin bilan bog‘lanish”, havolasi esa kerakli adminning `https://t.me/username` manzili bo‘lishi mumkin. Ko‘rinish va yuborishni tasdiqlash oynasida tugma xabar ostida chiqadi. Bu tanlov o‘chiq bo‘lsa, faqat matn yuboriladi.
+“Tugma qo‘shish” ni yoqing, tugma nomi va Telegram `@username` yoki to‘liq HTTPS havolasini kiriting. Masalan, nomi “👤 Admin bilan bog‘lanish”, havolasi esa kerakli adminning `@username` manzili bo‘lishi mumkin. Panel uni avtomatik `https://t.me/username` havolasiga aylantiradi; API va Telegramga shu to‘liq havola yuboriladi. Ko‘rinish va yuborishni tasdiqlash oynasida tugma xabar ostida chiqadi. Bu tanlov o‘chiq bo‘lsa, faqat matn yuboriladi.
 
 Panel bir xabarga bitta havolali tugmani qo‘llaydi: nomi 1–64 belgi, HTTPS havolasi 2048 belgigacha. Tugma kampaniya va yuborish tarixida saqlanadi; aloqa uzilgandan keyingi takroriy so‘rov ham ayni matn va tugma bilan tekshiriladi. Shaxsiy test rejimida tugmali xabarlar ham faqat tasdiqlangan bitta profilga yuboriladi.
 
