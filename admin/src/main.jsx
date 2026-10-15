@@ -48,19 +48,20 @@ function validateButton(button) {
   const rawText = typeof button?.text === 'string' ? button.text : '';
   const text = rawText.trim();
   const rawUrl = typeof button?.url === 'string' ? button.url : '';
-  const url = rawUrl.trim();
+  const input = rawUrl.trim();
+  const url = /^@[a-z0-9_]{1,32}$/i.test(input) ? `https://t.me/${input.slice(1)}` : input;
   const textError = !text ? 'Tugma nomini kiriting.' : text.length > 64 ? 'Tugma nomi 64 belgidan oshmasligi kerak.' : /[\u0000-\u001f\u007f]/.test(rawText) ? 'Tugma nomini bir qatorda, oddiy matn bilan kiriting.' : '';
   let urlError = '';
   let parsed;
-  if (!url) urlError = 'Tugma ochadigan HTTPS havolani kiriting.';
+  if (!url) urlError = 'Telegram @username yoki HTTPS havolani kiriting.';
   else if (url.length > 2048) urlError = 'Havola 2 048 belgidan oshmasligi kerak.';
   else {
     try {
       parsed = new URL(url);
       if (!/^https:\/\//i.test(url) || parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || /[\u0000-\u001f\u007f]/.test(rawUrl) || /[\s\\]/.test(url)) {
-        urlError = 'Login yoki parolsiz, https:// bilan boshlanadigan to‘liq havola kiriting.';
+        urlError = 'Telegram @username yoki login va parolsiz HTTPS havola kiriting.';
       } else if (parsed.href.length > 2048) urlError = 'Havola 2 048 belgidan oshmasligi kerak.';
-    } catch { urlError = 'To‘g‘ri HTTPS havolani kiriting. Masalan: https://t.me/username'; }
+    } catch { urlError = 'To‘g‘ri @username yoki HTTPS havola kiriting. Masalan: @username'; }
   }
   return { textError, urlError, value: !textError && !urlError ? { text, url: parsed.href } : null };
 }
@@ -166,7 +167,7 @@ function ButtonEditor({ value, onChange, disabled, validation }) {
     <div className="button-editor-heading"><div><strong id="button-toggle-label">Tugma qo‘shish</strong><p id="button-toggle-hint">Ixtiyoriy · Xabar ostida havolali tugma chiqadi.</p></div><button type="button" className="button-toggle" role="switch" aria-checked={value.enabled} aria-labelledby="button-toggle-label" aria-describedby="button-toggle-hint" aria-controls="button-fields" disabled={disabled} onClick={() => { setTouched({ text: false, url: false }); onChange({ ...value, enabled: !value.enabled }); }}><span /></button></div>
     {value.enabled && <div className="button-fields" id="button-fields">
       <div><label htmlFor="button-text">Tugma nomi</label><input id="button-text" value={value.text} onChange={(event) => onChange({ ...value, text: event.target.value })} onBlur={() => setTouched((previous) => ({ ...previous, text: true }))} disabled={disabled} placeholder={DEFAULT_BUTTON_TEXT} aria-invalid={Boolean(textError)} aria-describedby={textError ? 'button-text-error button-text-hint' : 'button-text-hint'} /><div className="button-field-hint" id="button-text-hint">Emoji qo‘shishingiz mumkin.<span>{number(value.text.trim().length)} / 64</span></div>{textError && <p className="field-error" id="button-text-error" role="alert">{textError}</p>}</div>
-      <div><label htmlFor="button-url">Tugma havolasi</label><input id="button-url" type="url" inputMode="url" autoCapitalize="none" autoComplete="off" spellCheck="false" value={value.url} onChange={(event) => onChange({ ...value, url: event.target.value })} onBlur={() => setTouched((previous) => ({ ...previous, url: true }))} disabled={disabled} placeholder="https://t.me/username" aria-invalid={Boolean(urlError)} aria-describedby={urlError ? 'button-url-error button-url-hint' : 'button-url-hint'} /><p className="button-field-hint" id="button-url-hint">Telegram profil yoki saytning HTTPS manzilini kiriting.</p>{urlError && <p className="field-error" id="button-url-error" role="alert">{urlError}</p>}</div>
+      <div><label htmlFor="button-url">Tugma havolasi</label><input id="button-url" type="text" inputMode="url" autoCapitalize="none" autoComplete="off" spellCheck="false" value={value.url} onChange={(event) => onChange({ ...value, url: event.target.value })} onBlur={() => setTouched((previous) => ({ ...previous, url: true }))} disabled={disabled} placeholder="@username yoki https://..." aria-invalid={Boolean(urlError)} aria-describedby={urlError ? 'button-url-error button-url-hint' : 'button-url-hint'} /><p className="button-field-hint" id="button-url-hint">Telegram @username yoki saytning HTTPS manzilini kiriting.</p>{urlError && <p className="field-error" id="button-url-error" role="alert">{urlError}</p>}</div>
     </div>}
   </div>;
 }
@@ -246,7 +247,7 @@ function Dashboard({ session, onUnauthorized, onLogout, draft, setDraft, buttonD
   const buttonValidation = validateButton(buttonDraft);
   const buttonInvalid = buttonDraft.enabled && !buttonValidation.value;
   const composeLocked = Boolean(pending) || sending || Boolean(inProgress);
-  const previewButton = pending ? pending.button : buttonDraft.enabled ? { text: buttonDraft.text, url: buttonDraft.url } : undefined;
+  const previewButton = pending ? pending.button : buttonDraft.enabled ? buttonValidation.value || { text: buttonDraft.text, url: buttonDraft.url } : undefined;
   const canSend = draft.trim().length > 0 && !overLimit && !buttonInvalid && dashboard && dashboard.audienceCount > 0 && !inProgress && !pending && !loadError && !sending;
 
   useEffect(() => {
