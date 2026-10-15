@@ -165,7 +165,7 @@ Tanlangan HTTPS manzilda login sahifasi, noto‘g‘ri parolning rad etilishi, t
 
 ## Vercel production paneli
 
-Panel: `https://neo-sisra-admin.vercel.app`, Vercel loyihasi `muhammadrasuls-projects/neo-sisra-admin`. Frontend Vercel’da, API va yuborish workeri mavjud bot serverida ishlaydi. Botning production sozlamalari:
+Panel: `https://neo-sisra-admin.vercel.app`, Vercel loyihasi `october-new/neo-sisra-admin` (foydalanuvchi shu team’ga ko‘chirgan). Frontend Vercel’da, API va yuborish workeri mavjud bot serverida ishlaydi. Botning production sozlamalari:
 
 ```dotenv
 ADMIN_ENABLED=true
@@ -177,7 +177,7 @@ ADMIN_TRUST_PROXY=true
 
 `admin/vercel.json` faqat `/api/admin/` so‘rovlarini `https://neo-sisra-admin.91-98-95-234.sslip.io` manziliga yo‘naltiradi. Serverdagi alohida `neo-sisra-admin` nginx konfiguratsiyasi ularni loopback `18887` portiga uzatadi, upstream Host’ni `neo-sisra-admin.vercel.app` qilib belgilaydi va brauzer Origin’ini saqlaydi. Login cookie’si Secure/HttpOnly/SameSite=Strict; API javoblari keshlanmaydi. Login urinishlari nginx ko‘rgan Vercel proxy IP’si bo‘yicha cheklanadi.
 
-Frontendni yangilashda `npm run admin:build` bajaring. Toza staging papkaga faqat `admin/dist/` ichidagi fayllar va `admin/vercel.json` nusxasini joylang; repozitoriy yoki `admin/` manba papkasini shu konfiguratsiya bilan yuklamang. `.local/vercel-admin-site` joriy staging papka. Shu papkadan `npx vercel deploy --prod --yes --scope muhammadrasuls-projects` ishlatiladi. Vercel uchun bot tokeni, SSH kaliti yoki admin paroli kerak emas. Loyiha Git bilan avtomatik ulanmagan; frontend yangilanishi alohida deploy qilinadi.
+Frontendni yangilashda `npm run admin:build` bajaring. Toza staging papkaga faqat `admin/dist/` ichidagi fayllar va `admin/vercel.json` nusxasini joylang; repozitoriy yoki `admin/` manba papkasini shu konfiguratsiya bilan yuklamang. `.local/vercel-admin-site` joriy staging papka. Shu papkadan `npx vercel deploy --prod --yes --scope october-new` ishlatiladi. Vercel uchun bot tokeni, SSH kaliti yoki admin paroli kerak emas. Loyiha Git bilan avtomatik ulanmagan; frontend yangilanishi alohida deploy qilinadi.
 
 Faqat doimiy production alias’dan foydalaning: tasodifiy deployment/preview manzili API Origin tekshiruviga mos kelmaydi. Bot kodi esa Git main’dagi commitni tekshiradigan mavjud server polleri orqali yangilanadi. `.local/admin-live/` operator tayyorlov fayllari va serverdagi `admin-upgrade-20261015/backups` zaxirasi Git/Vercel’ga kirmaydi. TLS sertifikati serverdagi certbot renewal orqali yangilanadi.
 
