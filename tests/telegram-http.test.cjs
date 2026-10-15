@@ -222,3 +222,41 @@ test('successful streamed JSON is bounded and parsed inside the original deadlin
   await assert.rejects(limited.fetchJson(secretUrl), error => assertSafe(error, 'TELEGRAM_BODY_TOO_LARGE'));
   assert.equal(excessive.state.cancelled, 1);
 });
+
+test('only the explicit Telegram 403 block description receives the safe blocked classification', async () => {
+  for (const [description, reason] of [
+    ['Forbidden: bot was blocked by the user', 'bot_blocked'],
+    ['Forbidden: user is deactivated', undefined],
+    ['Forbidden: bot was kicked from the group chat', undefined],
+    [secretUrl, undefined],
+  ]) {
+    const h = harness(async () => ({ ok: false, status: 403, json: async () => ({ ok: false, error_code: 403, description }) }));
+    await assert.rejects(h.fetchJson(secretUrl), error => {
+      assertSafe(error, 'TELEGRAM_HTTP_ERROR');
+      assert.equal(error.status, 403);
+      assert.equal(error.errorCode, 403);
+      assert.equal(error.reason, reason);
+      assert.equal(error.description, undefined);
+      assert.doesNotMatch(JSON.stringify(error), /OFFLINE_SECRET|Forbidden|api\.telegram/);
+      return true;
+    });
+  }
+});
+
+test('malformed and oversized 403 bodies never falsely count as blocked', async () => {
+  for (const chunks of [[Buffer.alloc(65537, 65)], [Buffer.from('not-json bot was blocked by the user')]]) {
+    const response = stream(chunks);
+    const h = harness(async () => ({ ok: false, status: 403, body: response.body }));
+    await assert.rejects(h.fetchJson(secretUrl), error => error.status === 403 && error.reason === undefined && assertSafe(error, 'TELEGRAM_HTTP_ERROR'));
+    assert.equal(h.jobs.size, 0);
+  }
+});
+
+test('HTTP 200 Telegram failures expose numeric codes and safe block classification instead of raw payloads', async () => {
+  const h = harness(async () => ({ ok: true, status: 200, json: async () => ({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user '+secretUrl }) }));
+  await assert.rejects(h.fetchJson(secretUrl), error => {
+    assertSafe(error, 'TELEGRAM_HTTP_ERROR');
+    assert.equal(error.status, 200); assert.equal(error.errorCode, 403); assert.equal(error.reason, 'bot_blocked');
+    return true;
+  });
+});

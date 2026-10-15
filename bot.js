@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 
 const BASE_DIR = __dirname;
 
@@ -20,9 +20,53 @@ function loadEnv() {
 
 loadEnv();
 
+function normalizeBroadcastButton(value) {
+  if (value == null) return null;
+  const invalid = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
+  if (typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(key => !['text', 'url'].includes(key))) {
+    invalid('Tugma nomi va HTTPS havolasini kiriting.');
+  }
+  if (typeof value.text !== 'string' || !value.text.trim() || value.text.trim().length > 64
+      || /[\u0000-\u001f\u007f]/.test(value.text)) {
+    invalid('Tugma nomi 1–64 belgidan iborat boʻlishi kerak.');
+  }
+  if (typeof value.url !== 'string' || /[\u0000-\u001f\u007f]/.test(value.url)) {
+    invalid('Tugma uchun toʻliq HTTPS havolasini kiriting.');
+  }
+  const candidate = value.url.trim();
+  if (!/^https:\/\/[^\s\\]+$/i.test(candidate) || candidate.length > 2048) {
+    invalid('Tugma uchun 2048 belgigacha boʻlgan toʻliq HTTPS havolasini kiriting.');
+  }
+  let url;
+  try { url = new URL(candidate); } catch { invalid('Tugma havolasi notoʻgʻri.'); }
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.href.length > 2048) {
+    invalid('Tugma havolasi HTTPS boʻlishi va login yoki parolni oʻz ichiga olmasligi kerak.');
+  }
+  return { text: value.text.trim(), url: url.href };
+}
+
 function createBot(options = {}) {
+const TELEGRAM_TIMEOUT_MS = options.telegramTimeoutMs ?? 15000;
+if (!Number.isSafeInteger(TELEGRAM_TIMEOUT_MS) || TELEGRAM_TIMEOUT_MS < 1 || TELEGRAM_TIMEOUT_MS > 120000) {
+  throw new Error('Telegram soʻrovi uchun kutish muddati 1–120000 ms boʻlishi kerak.');
+}
 const DATA_DIR = path.resolve(options.dataDir || process.env.DATA_DIR || path.join(BASE_DIR, 'data'));
 const EXPORT_PATH = path.join(DATA_DIR, 'neo-sisra-pay-export.xls');
+const testRecipientConfigured = Object.prototype.hasOwnProperty.call(options, 'broadcastTestRecipient');
+const testRecipientEnvConfigured = process.env.BROADCAST_TEST_CHAT_ID !== undefined || process.env.BROADCAST_TEST_LABEL !== undefined;
+let broadcastTestRecipient = null;
+if (testRecipientConfigured || testRecipientEnvConfigured) {
+  const candidate = testRecipientConfigured ? options.broadcastTestRecipient : {
+    chatId: /^\d+$/.test(process.env.BROADCAST_TEST_CHAT_ID || '') ? Number(process.env.BROADCAST_TEST_CHAT_ID) : NaN,
+    label: process.env.BROADCAST_TEST_LABEL,
+  };
+  if (!candidate || !Number.isSafeInteger(candidate.chatId) || candidate.chatId <= 0) {
+    throw new Error('BROADCAST_TEST_CHAT_ID musbat, aniq Telegram chat ID boʻlishi kerak.');
+  }
+  broadcastTestRecipient = Object.freeze({ chatId: candidate.chatId,
+    label: typeof candidate.label === 'string' && candidate.label.trim() ? candidate.label.trim() : 'Test profili' });
+}
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || '').trim();
 const GOOGLE_SCRIPT_URL = (process.env.GOOGLE_SCRIPT_URL || '').trim();
@@ -83,7 +127,6 @@ const FILE_API = 'https://api.telegram.org/file/bot' + BOT_TOKEN;
 const NOTIFY_CHAT_ID = (process.env.NOTIFY_CHAT_ID || '').trim();
 const NOTIFY_REG_TOPIC = Number(process.env.NOTIFY_REG_TOPIC || 0);
 const NOTIFY_PAY_TOPIC = Number(process.env.NOTIFY_PAY_TOPIC || 0);
-const TELEGRAM_TIMEOUT_MS = 15000;
 const TELEGRAM_FILE_TIMEOUT_MS = 30000;
 const POLL_TIMEOUT_SECONDS = 25;
 const POLL_FETCH_TIMEOUT_MS = 35000;
@@ -223,9 +266,10 @@ function nowParts() {
   return {full:parts.day+'.'+parts.month+'.'+parts.year+' '+parts.hour+':'+parts.minute+':'+parts.second,date:parts.year+'-'+parts.month+'-'+parts.day,time:parts.hour+':'+parts.minute+':'+parts.second};
 }
 
-async function tg(method, data = {}, priority = 0) {
+async function tg(method, data = {}, priority = 0, beforeSend) {
   if (!BOT_TOKEN) throw new Error('BOT_TOKEN .env faylida yoq');
   return telegramQueue.run({chatId: data.chat_id, priority, rateLimited: !['getMe','getFile','answerCallbackQuery'].includes(method)}, async () => {
+  if (beforeSend) beforeSend();
   const payload = await fetchJson(
     `${API}/${method}`,
     {
@@ -876,6 +920,156 @@ async function adminPanel(chatId) {
 }
 
 let broadcastFlight = false;
+let broadcastStateLoaded = false;
+function adminBroadcastError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+function broadcastAudience(db) {
+  if (broadcastTestRecipient) return [broadcastTestRecipient.chatId];
+  const ids = new Set();
+  const add = value => {
+    const id = Number(value);
+    if (Number.isSafeInteger(id) && id > 0 && !ADMIN_IDS.includes(String(id))) ids.add(id);
+  };
+  for (const [key, user] of Object.entries(db.users || {})) add(user.chat_id ?? key);
+  for (const row of [...(db.registrations || []), ...(db.payments || [])]) add(row.telegram_id);
+  return [...ids];
+}
+function broadcastScope() {
+  return { broadcastMode: broadcastTestRecipient ? 'test' : 'all',
+    testRecipient: broadcastTestRecipient ? { ...broadcastTestRecipient } : null };
+}
+function assertBroadcastScope(db, chatId = broadcastTestRecipient?.chatId) {
+  if (!broadcastTestRecipient) return;
+  if (chatId !== broadcastTestRecipient.chatId || !Array.isArray(db.broadcast_recipients)
+      || db.broadcast_recipients.length !== 1 || db.broadcast_recipients[0] !== broadcastTestRecipient.chatId) {
+    throw Object.assign(adminBroadcastError(409, 'Test rejimida faqat belgilangan profilga yuborish mumkin. Eski yuborishni bekor qilib, yangi xabar yarating.'),
+      { code: 'BROADCAST_SCOPE_MISMATCH' });
+  }
+}
+function broadcastSnapshot(job, db) {
+  if (!job) return null;
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const total = count(job.total ?? ((db.broadcast_recipients?.length || 0) * (job.items?.length || 1)));
+  const sent = count(job.sent), blocked = count(job.blocked), failed = count(job.failed), unknown = count(job.unknown);
+  const processed = sent + blocked + failed + unknown;
+  return { id: job.id, status: job.status, text: job.text ?? 'Telegram admin orqali yuborilgan xabar',
+    ...(job.button ? { button: { ...job.button } } : {}),
+    broadcastMode: job.broadcastMode || 'all', testRecipient: job.testRecipient ? { ...job.testRecipient } : null,
+    total, sent, blocked, failed, unknown, processed, remaining: Math.max(0, total - processed),
+    createdAt: job.createdAt || null, finishedAt: job.finishedAt || null };
+}
+function rememberFinishedBroadcast(db, job) {
+  if (!['done', 'cancelled'].includes(job.status) || job.in_flight) return;
+  job.finishedAt ||= new Date().toISOString();
+  const snapshot = broadcastSnapshot(job, db);
+  db.broadcast_history = [snapshot, ...(db.broadcast_history || []).filter(item => item.id !== job.id)].slice(0, 20);
+  if (job.requestId && db.admin_broadcast_requests?.[job.requestId]) {
+    const { text, ...compact } = snapshot;
+    db.admin_broadcast_requests[job.requestId].result = compact;
+  }
+}
+function recoverBroadcast(db) {
+  const job = db.broadcast_job;
+  if (!job || broadcastFlight) return;
+  if (job.status === 'running') job.status = 'interrupted';
+  // A process can die after cancellation but before an accepted send settles.
+  // Its durable cursor already skipped that recipient; never send it twice.
+  if (job.in_flight) {
+    job.unknown = (job.unknown || 0) + 1;
+    job.in_flight = false;
+  }
+  rememberFinishedBroadcast(db, job);
+}
+function adminBroadcastDb() {
+  if (backgroundStopping && !store) throw adminBroadcastError(409, 'Bot toʻxtatilmoqda. Keyinroq qayta urinib koʻring.');
+  const db = loadDb();
+  if (!broadcastStateLoaded) {
+    broadcastStateLoaded = true;
+    recoverBroadcast(db);
+    saveDb(db);
+  }
+  return db;
+}
+function getAdminDashboard() {
+  const db = adminBroadcastDb();
+  return { ...broadcastScope(), audienceCount: broadcastAudience(db).length, job: broadcastSnapshot(db.broadcast_job, db),
+    history: (db.broadcast_history || []).map(item => ({ ...item })) };
+}
+function assertBroadcastAvailable(db) {
+  if (backgroundStopping) throw adminBroadcastError(409, 'Bot toʻxtatilmoqda. Keyinroq qayta urinib koʻring.');
+  if (broadcastFlight || ['running', 'interrupted'].includes(db.broadcast_job?.status)) {
+    throw adminBroadcastError(409, 'Oldingi yuborish tugamagan. Uni davom ettiring yoki bekor qiling.');
+  }
+}
+function createAdminBroadcast({ text, requestId, button: buttonInput } = {}) {
+  if (typeof text !== 'string' || !text.trim() || text.length > 4096) {
+    throw adminBroadcastError(400, 'Xabar matni 1–4096 belgidan iborat boʻlishi kerak.');
+  }
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(requestId)) {
+    throw adminBroadcastError(400, 'Yuborish identifikatori notoʻgʻri. Sahifani yangilang.');
+  }
+  const button = normalizeBroadcastButton(buttonInput);
+  const db = adminBroadcastDb();
+  const textHash = createHash('sha256').update(text).digest('hex');
+  const buttonHash = button ? createHash('sha256').update(JSON.stringify(button)).digest('hex') : null;
+  const previous = Object.prototype.hasOwnProperty.call(db.admin_broadcast_requests || {}, requestId)
+    ? db.admin_broadcast_requests[requestId] : null;
+  if (previous) {
+    // Old text-only requests have no buttonHash and remain valid retries.
+    if (previous.textHash !== textHash || (previous.buttonHash ?? null) !== buttonHash) {
+      throw adminBroadcastError(409, 'Bu yuborish identifikatori boshqa xabar uchun ishlatilgan.');
+    }
+    if (db.broadcast_job?.id === previous.id) return broadcastSnapshot(db.broadcast_job, db);
+    return { ...previous.result, text };
+  }
+  assertBroadcastAvailable(db);
+  const recipients = broadcastAudience(db);
+  if (!recipients.length) throw adminBroadcastError(409, 'Hozircha xabar yuborish uchun foydalanuvchilar yoʻq.');
+  rememberFinishedBroadcast(db, db.broadcast_job || {});
+  db.broadcast_recipients = recipients;
+  db.broadcast_job = { id: newItemId(), kind: 'admin_text', requestId, status: 'running', text, ...broadcastScope(),
+    ...(button ? { button } : {}),
+    total: recipients.length, recipient: 0, item: 0, sent: 0, blocked: 0, failed: 0, unknown: 0,
+    in_flight: false, createdAt: new Date().toISOString(), finishedAt: null };
+  db.admin_broadcast_requests ||= {};
+  const { text: _text, ...compact } = broadcastSnapshot(db.broadcast_job, db);
+  db.admin_broadcast_requests[requestId] = { id: db.broadcast_job.id, textHash, buttonHash, result: compact };
+  saveDb(db);
+  startBroadcastWorker(db);
+  return broadcastSnapshot(db.broadcast_job, db);
+}
+function findAdminBroadcast(db, id) {
+  const job = db.broadcast_job;
+  if (!job || job.id !== id) throw adminBroadcastError(404, 'Yuborish topilmadi. Sahifani yangilang.');
+  return job;
+}
+function resumeAdminBroadcast(id) {
+  const db = adminBroadcastDb(), job = findAdminBroadcast(db, id);
+  if (backgroundStopping || broadcastFlight) throw adminBroadcastError(409, 'Yuborish hali yakunlanmoqda. Bir oz kuting.');
+  if (job.status !== 'interrupted') throw adminBroadcastError(409, 'Faqat toʻxtab qolgan yuborishni davom ettirish mumkin.');
+  assertBroadcastScope(db);
+  job.status = 'running';
+  job.finishedAt = null;
+  saveDb(db);
+  startBroadcastWorker(db);
+  return broadcastSnapshot(job, db);
+}
+function cancelAdminBroadcast(id) {
+  const db = adminBroadcastDb(), job = findAdminBroadcast(db, id);
+  if (!['running', 'interrupted', 'cancelled'].includes(job.status)) {
+    throw adminBroadcastError(409, 'Bu yuborish allaqachon yakunlangan.');
+  }
+  job.status = 'cancelled';
+  rememberFinishedBroadcast(db, job);
+  saveDb(db);
+  return broadcastSnapshot(job, db);
+}
+function broadcastFailureKind(error) {
+  if (error?.reason === 'bot_blocked') return 'blocked';
+  const status = error?.errorCode || error?.status;
+  return Number.isInteger(status) && status >= 400 && status < 500 ? 'failed' : 'unknown';
+}
 function startBroadcastWorker(db) {
   if (broadcastFlight || backgroundStopping || db.broadcast_job?.status !== 'running') return;
   broadcastFlight = true;
@@ -883,28 +1077,56 @@ function startBroadcastWorker(db) {
     const job = db.broadcast_job;
     try {
       while (!backgroundStopping && job.status === 'running' && job.recipient < db.broadcast_recipients.length) {
-        const chatId = db.broadcast_recipients[job.recipient];
-        const item = job.items[job.item];
-        // Persist the cursor before Telegram: a lost acknowledgement is not
-        // automatically resent after restart. The uncertainty stays visible.
-        job.in_flight = true;
-        job.item++;
-        if (job.item >= job.items.length) { job.item = 0; job.recipient++; }
-        saveDb(db);
+        const recipient = job.recipient, itemIndex = job.item;
+        const chatId = db.broadcast_recipients[recipient];
+        const plainText = job.kind === 'admin_text';
+        const item = plainText ? null : job.items[itemIndex];
+        let attempted = false;
+        const beforeSend = () => {
+          if (backgroundStopping || job.status !== 'running') throw Object.assign(new Error('Yuborish toʻxtatildi.'), { code: 'BROADCAST_SKIPPED' });
+          // Recheck the captured destination and complete stored audience after
+          // queueing, immediately before every request (including 429 retries).
+          assertBroadcastScope(db, chatId);
+          if (attempted) return; // A safe Telegram 429 retry uses the same cursor.
+          // Commit immediately before network I/O. Queued-but-unstarted sends
+          // can be cancelled, while a lost acknowledgement is never replayed.
+          job.in_flight = true;
+          job.item++;
+          if (plainText || job.item >= job.items.length) { job.item = 0; job.recipient++; }
+          saveDb(db);
+          attempted = true;
+        };
         try {
-          await tg('copyMessage', { chat_id: chatId, from_chat_id: job.fromChatId, message_id: item.srcMessageId }, 10);
+          await tg(plainText ? 'sendMessage' : 'copyMessage', plainText
+            ? { chat_id: chatId, text: job.text,
+              ...(job.button ? { reply_markup: { inline_keyboard: [[{ text: job.button.text, url: job.button.url }]] } } : {}) }
+            : { chat_id: chatId, from_chat_id: job.fromChatId, message_id: item.srcMessageId }, 10, beforeSend);
           job.sent++;
         } catch (error) {
-          job.failed++;
-          console.error('Broadcast delivery: '+safeError(error));
+          if (storageFailure || error.code === 'STATE_STORE_ERROR') throw storageFailure || error;
+          if (!attempted || ['BROADCAST_SKIPPED', 'BROADCAST_SCOPE_MISMATCH'].includes(error.code)) {
+            // No accepted send occurred (or a 429 was explicitly rejected).
+            // Preserve that recipient for an interrupted job's explicit resume.
+            job.recipient = recipient;
+            job.item = itemIndex;
+            job.in_flight = false;
+            if (job.status === 'running') job.status = 'interrupted';
+            saveDb(db);
+            break;
+          }
+          const kind = broadcastFailureKind(error);
+          job[kind] = (job[kind] || 0) + 1;
+          const transportCode = ['TELEGRAM_TIMEOUT', 'TELEGRAM_NETWORK_ERROR', 'TELEGRAM_HTTP_ERROR', 'TELEGRAM_JSON_ERROR', 'TELEGRAM_BODY_TOO_LARGE'].includes(error.code) ? ' ('+error.code+')' : '';
+          console.error('Broadcast delivery: '+kind+transportCode);
         }
         job.in_flight = false;
         saveDb(db);
       }
       if (job.status === 'running') job.status = job.recipient >= db.broadcast_recipients.length ? 'done' : 'interrupted';
+      rememberFinishedBroadcast(db, job);
       saveDb(db);
-      if (job.status === 'done') await sendMessage(job.fromChatId,
-        'Yuborish yakunlandi. Yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+job.failed+'.', adminKeyboard());
+      if (job.status === 'done' && job.fromChatId != null) await sendMessage(job.fromChatId,
+        'Yuborish yakunlandi. Yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+((job.failed || 0)+(job.blocked || 0)+(job.unknown || 0))+'.', adminKeyboard());
     } finally { broadcastFlight = false; }
   });
 }
@@ -918,10 +1140,12 @@ async function runBroadcast(db, adminChatId) {
     await sendMessage(adminChatId,'Yuborish uchun material yoʻq.',adminKeyboard());
     return;
   }
-  db.broadcast_recipients = registeredChatIds(db).filter(id => id !== adminChatId);
-  db.broadcast_job = { id: newItemId(), status: 'running', fromChatId: b.fromChatId,
+  rememberFinishedBroadcast(db, db.broadcast_job || {});
+  db.broadcast_recipients = broadcastTestRecipient ? [broadcastTestRecipient.chatId] : registeredChatIds(db).filter(id => id !== adminChatId);
+  db.broadcast_job = { id: newItemId(), status: 'running', fromChatId: b.fromChatId, ...broadcastScope(),
     items: b.items.map(item => ({srcMessageId:item.srcMessageId})), recipient: 0, item: 0,
-    sent: 0, failed: 0, in_flight: false };
+    sent: 0, failed: 0, blocked: 0, unknown: 0, in_flight: false,
+    total: db.broadcast_recipients.length * b.items.length, createdAt: new Date().toISOString(), finishedAt: null };
   clearBroadcast(db);
   saveDb(db);
   startBroadcastWorker(db);
@@ -937,11 +1161,18 @@ async function handleAdmin(message, db) {
     if (text !== '/broadcast_status' && job.fromChatId !== chatId) {
       await sendMessage(chatId,'Bu yuborishni uni boshlagan admin boshqaradi.'); return true;
     }
-    if (text === '/broadcast_cancel') job.status = 'cancelled';
-    if (text === '/broadcast_resume' && job.status === 'interrupted') job.status = 'running';
+    if (text === '/broadcast_cancel') { job.status = 'cancelled'; rememberFinishedBroadcast(db, job); }
+    if (text === '/broadcast_resume' && job.status === 'interrupted') {
+      try { assertBroadcastScope(db); }
+      catch (error) {
+        if (error.code !== 'BROADCAST_SCOPE_MISMATCH') throw error;
+        await sendMessage(chatId, error.message, adminKeyboard()); return true;
+      }
+      job.status = 'running';
+    }
     saveDb(db);
     startBroadcastWorker(db);
-    await sendMessage(chatId,'Holat: '+job.status+'; yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+job.failed+'.',adminKeyboard());
+    await sendMessage(chatId,'Holat: '+job.status+'; yuborilgan xabarlar: '+job.sent+'; tasdiqlanmagan: '+((job.failed || 0)+(job.blocked || 0)+(job.unknown || 0))+'.',adminKeyboard());
     return true;
   }
   const b = db.broadcast;
@@ -967,12 +1198,14 @@ async function handleAdmin(message, db) {
   }
 
   if (text === '📣 Xabar yuborish' || text === '/broadcast') {
-    const n = registeredChatIds(db).length;
+    const n = broadcastTestRecipient ? 1 : registeredChatIds(db).length;
     db.broadcast = { step: 'collecting', fromChatId: chatId, items: [] };
     await sendHtml(
       chatId,
       [
-        `Ro'yxatdan o'tgan <b>${n}</b> ta foydalanuvchiga xabar ketadi.`,
+        broadcastTestRecipient
+          ? `Test rejimi: xabar faqat <b>${escHtml(broadcastTestRecipient.label)}</b> profiliga yuboriladi.`
+          : `Ro'yxatdan o'tgan <b>${n}</b> ta foydalanuvchiga xabar ketadi.`,
         '',
         "Materiallarni birin-ketin yuboring — matn, rasm, video yoki istalgan fayl.",
         "Har birining ostida ⬆️ ⬇️ 🗑 tugmalari chiqadi.",
@@ -1331,10 +1564,8 @@ function recoverInterrupted(db) {
   for (const entry of Object.values(db.phone_updates || {})) {
     if (entry.status === 'sending') { entry.status = 'pending'; entry.retry_at = 0; }
   }
-  if (db.broadcast_job?.status === 'running') {
-    db.broadcast_job.status = 'interrupted';
-    if (db.broadcast_job.in_flight) { db.broadcast_job.failed++; db.broadcast_job.in_flight = false; }
-  }
+  recoverBroadcast(db);
+  broadcastStateLoaded = true;
   return db;
 }
 
@@ -1451,27 +1682,50 @@ async function start() {
   // Acquire the data lock before connecting a second polling process.
   loadDb();
   const runtime = createPollingRuntime();
-  process.on('SIGTERM',runtime.requestStop);
-  process.on('SIGINT',runtime.requestStop);
+  let adminServer, adminClosing;
+  const closeAdmin = () => {
+    if (adminServer && !adminClosing) adminClosing = adminServer.close();
+    return adminClosing;
+  };
+  const onStop = () => {
+    runtime.requestStop();
+    Promise.resolve(closeAdmin()).catch(() => console.error('Admin panel serverini yopib boʻlmadi.'));
+  };
+  process.on('SIGTERM',onStop);
+  process.on('SIGINT',onStop);
   try {
     const identity = await tg('getMe');
     if (identity.username !== 'neo_sisrabot') throw new Error('Sozlangan token Neo Sisra botiga tegishli emas.');
     console.info('Neo Sisra bot identity verified: @'+identity.username);
+    if (process.env.ADMIN_ENABLED === 'true') {
+      const { createAdminServer } = require('./admin-server.cjs');
+      adminServer = createAdminServer({
+        bot: { getAdminDashboard, createAdminBroadcast, resumeAdminBroadcast, cancelAdminBroadcast },
+        dataDir: DATA_DIR, origin: process.env.ADMIN_ORIGIN,
+        host: process.env.ADMIN_HOST || '127.0.0.1', port: Number(process.env.ADMIN_PORT || 8787),
+        trustProxy: process.env.ADMIN_TRUST_PROXY === 'true',
+      });
+      await adminServer.start();
+    }
     await runtime.run();
   } finally {
-    runtime.dispose();
-    process.removeListener('SIGTERM',runtime.requestStop);
-    process.removeListener('SIGINT',runtime.requestStop);
-    if (!storageFailure) closeStore();
+    try { await closeAdmin(); }
+    finally {
+      runtime.dispose();
+      process.removeListener('SIGTERM',onStop);
+      process.removeListener('SIGINT',onStop);
+      if (!storageFailure) closeStore();
+    }
   }
 }
 return { emptyDb, exportExcel, normalizePhone, paymentText, handleMessage, handleCallback,
   recoverInterrupted, createPollingRuntime, leadReport, waitForBackground, loadDb, saveDb,
   closeStore, pumpDeliveries, pumpPhoneUpdates, start,
+  getAdminDashboard, createAdminBroadcast, resumeAdminBroadcast, cancelAdminBroadcast,
   queueStats: () => ({ deliveries: deliveryQueue.stats(), telegram: telegramQueue.stats?.() }) };
 }
 
-module.exports = { createBot };
+module.exports = { createBot, normalizeBroadcastButton };
 // Preserve the small helper API for consumers; defer configuration and opening
 // the database until a helper is actually used.
 let defaultBot;

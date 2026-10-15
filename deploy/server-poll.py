@@ -37,11 +37,13 @@ DEPLOYER = "/usr/local/sbin/neo-sisra-bot-deploy"
 RUNTIME_FILES = frozenset((
     "bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json",
     "state-store.cjs", "work-queue.cjs", "telegram-queue.cjs",
+    "admin-server.cjs", "admin-auth.cjs", "admin-assets.cjs",
 ))
 REQUIRED = RUNTIME_FILES | frozenset((
     "deploy/server-deploy.py", "deploy/ssh-entry.sh", "deploy/tests/test_server_deploy.py",
     "deploy/server-poll.py", "deploy/tests/test_server_poll.py",
     "deploy/export-state.cjs",
+    "scripts/setup-admin.cjs", "scripts/admin-demo.cjs", "scripts/admin-personal-test.cjs",
     "tests/bot-flow.test.cjs", "tests/google-delivery.test.cjs",
     "tests/shutdown.test.cjs", "tests/telegram-http.test.cjs",
 ))

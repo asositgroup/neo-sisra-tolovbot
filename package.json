@@ -5,9 +5,14 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "check": "node --check bot.js && node --check google-delivery.cjs && node --check telegram-http.cjs && node --check state-store.cjs && node --check work-queue.cjs && node --check telegram-queue.cjs",
+    "check": "node --check bot.js && node --check google-delivery.cjs && node --check telegram-http.cjs && node --check state-store.cjs && node --check work-queue.cjs && node --check telegram-queue.cjs && node --check admin-auth.cjs && node --check admin-server.cjs && node --check admin-assets.cjs && node --check scripts/setup-admin.cjs && node --check scripts/admin-demo.cjs && node --check scripts/admin-personal-test.cjs",
     "test": "node --test tests/*.test.cjs",
-    "test:apps-script": "node --test apps-script/tests/*.test.cjs"
+    "test:apps-script": "node --test apps-script/tests/*.test.cjs",
+    "admin:setup": "node scripts/setup-admin.cjs",
+    "admin:demo": "node scripts/admin-demo.cjs",
+    "admin:test-personal": "node scripts/admin-personal-test.cjs",
+    "admin:build": "npm run build --prefix admin",
+    "admin:dev": "npm run dev --prefix admin"
   },
   "engines": {
     "node": ">=22.13"

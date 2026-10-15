@@ -70,7 +70,11 @@ async function readJson(response, registerCancel, maxBytes, label) {
 function httpFailure(label, status, data) {
   const failure = error('TELEGRAM_HTTP_ERROR', label);
   if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
-  if (data?.error_code === 429) failure.errorCode = 429;
+  if (Number.isInteger(data?.error_code) && data.error_code >= 400 && data.error_code <= 599) failure.errorCode = data.error_code;
+  // Retain only this safe classification, never the remote description. A
+  // deleted account/chat-not-found/other 403 is not evidence of a block.
+  if ((status === 403 || data?.error_code === 403) &&
+      typeof data?.description === 'string' && /\bbot was blocked by the user\b/i.test(data.description)) failure.reason = 'bot_blocked';
   const seconds = data?.parameters?.retry_after;
   if ((status === 429 || data?.error_code === 429) && Number.isFinite(seconds) && seconds > 0 && Number.isFinite(seconds * 1000)) failure.retryAfter = seconds;
   return failure;
@@ -99,11 +103,11 @@ async function request(url, options, timeoutMs, label, consume) {
       cancelBody = () => response?.body?.cancel?.();
       if (expired) { cancel(); throw error('TELEGRAM_TIMEOUT', label); }
       if (response?.ok !== true) {
-        if (response?.status === 429) {
+        if (response?.status === 429 || response?.status === 403) {
           let data;
           try { data = await readJson(response, cancellation => { cancelBody = cancellation; }, 64 * 1024, label); }
-          catch { /* A malformed rate-limit response is not safe to retry. */ }
-          throw httpFailure(label, 429, data);
+          catch { /* Malformed responses cannot classify blocks or authorize a retry. */ }
+          throw httpFailure(label, response.status, data);
         }
         throw httpFailure(label, response?.status);
       }
@@ -124,7 +128,7 @@ async function fetchJson(url, options = {}, timeoutMs = 15000, label = 'Telegram
   const operationLabel = safeLabel(label);
   return request(url, options, timeoutMs, operationLabel, async (response, registerCancel) => {
     const data = await readJson(response, registerCancel, 4 * 1024 * 1024, operationLabel);
-    if (data?.ok === false && data.error_code === 429) throw httpFailure(operationLabel, response.status, data);
+    if (data?.ok === false) throw httpFailure(operationLabel, response.status, data);
     return data;
   });
 }

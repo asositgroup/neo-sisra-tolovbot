@@ -1,0 +1,38 @@
+# Include from nginx's http context, for example sites-enabled.
+# Replace neo-admin.example.com and both certificate paths before enabling.
+# Issue/install the certificate using the operator's existing TLS workflow.
+# The bot remains neo-sisra-pay-bot.service, User=neo-sisra-bot, with only
+# /opt/neo-sisra-pay-bot/data writable. Do not run another bot process.
+# .env: ADMIN_ENABLED=true, ADMIN_HOST=127.0.0.1, ADMIN_PORT=8787,
+# ADMIN_ORIGIN=https://neo-admin.example.com, ADMIN_TRUST_PROXY=true
+# Trust proxy only with this loopback upstream and the overwritten single-IP
+# X-Forwarded-For header below; do not append arbitrary incoming proxy headers.
+
+server {
+    listen 80;
+    server_name neo-admin.example.com;
+    return 308 https://neo-admin.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name neo-admin.example.com;
+    ssl_certificate /etc/letsencrypt/live/neo-admin.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/neo-admin.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 32k;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_hide_header X-Powered-By;
+    }
+}

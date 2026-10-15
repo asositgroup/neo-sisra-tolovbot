@@ -33,8 +33,9 @@ LOCK = Path("/run/lock/neo-sisra-pay-bot-deploy.lock")
 UNIT = "neo-sisra-pay-bot.service"
 RUNTIME_USER = "neo-sisra-bot"
 LEGACY_FILES = frozenset(("bot.js", "google-delivery.cjs", "telegram-http.cjs", "package.json"))
-FILES = LEGACY_FILES | frozenset(("state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"))
-SUPPORTED_FILES = (LEGACY_FILES, FILES)
+PRE_ADMIN_FILES = LEGACY_FILES | frozenset(("state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"))
+FILES = PRE_ADMIN_FILES | frozenset(("admin-server.cjs", "admin-auth.cjs", "admin-assets.cjs"))
+SUPPORTED_FILES = (LEGACY_FILES, PRE_ADMIN_FILES, FILES)
 EXPORT_WRAPPER = Path("/usr/local/libexec/neo-sisra-export-state")
 EXPORT_MODULE = Path("/usr/local/lib/neo-sisra-bot/state-store.cjs")
 SQLITE_NAME = "bot_state.sqlite"
@@ -229,7 +230,7 @@ def extract_archive(source, staging):
     finally:
         archive.stream.close()
     if frozenset(found) not in SUPPORTED_FILES:
-        raise DeploymentError("archive requires either the complete legacy or current runtime")
+        raise DeploymentError("archive requires a complete supported runtime")
     return hashes
 
 

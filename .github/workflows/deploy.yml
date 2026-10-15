@@ -16,7 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -24,6 +24,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
+      - name: Rebuild and verify committed admin assets
+        run: |
+          npm ci --prefix admin
+          npm run build --prefix admin
+          git diff --exit-code -- admin-assets.cjs
       - name: Check JavaScript and run offline tests
         run: |
           npm run check
@@ -41,7 +46,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Package runtime files
-        run: tar --format=ustar -czf release.tar.gz bot.js google-delivery.cjs telegram-http.cjs state-store.cjs work-queue.cjs telegram-queue.cjs package.json
+        run: tar --format=ustar -czf release.tar.gz bot.js google-delivery.cjs telegram-http.cjs state-store.cjs work-queue.cjs telegram-queue.cjs admin-server.cjs admin-auth.cjs admin-assets.cjs package.json
       - name: Deploy and verify bot readiness
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

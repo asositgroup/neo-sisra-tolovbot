@@ -19,6 +19,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 
+if os.name != "posix":
+    raise unittest.SkipTest("Deployment ownership, flock and service tests require Linux")
+
+
 SCRIPT = Path(__file__).resolve().parents[1] / "server-deploy.py"
 SPEC = importlib.util.spec_from_file_location("server_deploy", SCRIPT)
 deploy = importlib.util.module_from_spec(SPEC)
@@ -29,10 +33,15 @@ LEGACY_PAYLOAD = {
     "telegram-http.cjs": b"module.exports = {};\n",
     "package.json": b'{"name":"offline-fixture","private":true}\n',
 }
-PAYLOAD = dict(LEGACY_PAYLOAD, **{
+PRE_ADMIN_PAYLOAD = dict(LEGACY_PAYLOAD, **{
     "state-store.cjs": b"module.exports = {};\n",
     "work-queue.cjs": b"module.exports = {};\n",
     "telegram-queue.cjs": b"module.exports = {};\n",
+})
+PAYLOAD = dict(PRE_ADMIN_PAYLOAD, **{
+    "admin-server.cjs": b"module.exports = {};\n",
+    "admin-auth.cjs": b"module.exports = {};\n",
+    "admin-assets.cjs": b"module.exports = {};\n",
 })
 
 
@@ -78,6 +87,17 @@ class ArchiveTests(unittest.TestCase):
     def test_complete_legacy_archive_remains_supported(self):
         result = deploy.extract_archive(archive(LEGACY_PAYLOAD.items()), self.staging)
         self.assertEqual(set(result), deploy.LEGACY_FILES)
+
+    def test_complete_seven_file_archive_remains_supported(self):
+        result = deploy.extract_archive(archive(PRE_ADMIN_PAYLOAD.items()), self.staging)
+        self.assertEqual(set(result), deploy.PRE_ADMIN_FILES)
+
+    def test_partial_admin_runtime_is_rejected(self):
+        for missing in ("admin-server.cjs", "admin-auth.cjs", "admin-assets.cjs"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                entries = [(name, content) for name, content in PAYLOAD.items() if name != missing]
+                with self.assertRaises(deploy.DeploymentError):
+                    deploy.extract_archive(archive(entries), Path(directory))
 
     def test_partial_new_runtime_is_rejected(self):
         for extras in (("state-store.cjs",), ("state-store.cjs", "work-queue.cjs")):
@@ -178,7 +198,7 @@ class PackageAndCommandTests(unittest.TestCase):
     def test_syntax_checks_run_as_runtime_user(self):
         with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
             deploy.validate_javascript(Path("/fixture"), deploy.FILES)
-        self.assertEqual(command.call_count, 6)
+        self.assertEqual(command.call_count, 9)
         for call in command.call_args_list:
             self.assertEqual(call.args[0][:6], ["/usr/sbin/runuser", "-u", "neo-sisra-bot", "--", "/usr/bin/node", "--check"])
 
@@ -186,6 +206,11 @@ class PackageAndCommandTests(unittest.TestCase):
         with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
             deploy.validate_javascript(Path("/fixture"), deploy.LEGACY_FILES)
         self.assertEqual(command.call_count, 3)
+
+    def test_seven_file_syntax_checks_do_not_require_admin_modules(self):
+        with patch.object(deploy, "command", return_value=Mock(returncode=0)) as command:
+            deploy.validate_javascript(Path("/fixture"), deploy.PRE_ADMIN_FILES)
+        self.assertEqual(command.call_count, 6)
 
     def test_syntax_failure_rejected(self):
         with patch.object(deploy, "command", return_value=Mock(returncode=1)):
@@ -320,6 +345,10 @@ class TransactionTests(unittest.TestCase):
         for name in deploy.FILES - deploy.LEGACY_FILES:
             (self.previous / name).unlink()
 
+    def make_previous_pre_admin(self):
+        for name in deploy.FILES - deploy.PRE_ADMIN_FILES:
+            (self.previous / name).unlink()
+
     def create_sqlite_marker(self):
         (self.base / "data" / deploy.SQLITE_NAME).write_bytes(b"offline SQLite marker")
 
@@ -328,6 +357,34 @@ class TransactionTests(unittest.TestCase):
         deploy.deploy("b" * 40, archive())
         self.assertEqual(self.current.resolve(), self.target)
         self.stop.assert_not_called()
+        self.assert_state_preserved()
+
+    def test_admin_runtime_can_deploy_with_seven_file_fallback(self):
+        self.make_previous_pre_admin()
+        deploy.deploy("b" * 40, archive())
+        self.assertEqual(self.current.resolve(), self.target)
+        self.stop.assert_not_called()
+        self.assert_state_preserved()
+
+    def test_admin_readiness_failure_restores_seven_file_fallback(self):
+        self.make_previous_pre_admin()
+        self.ready.side_effect = [deploy.DeploymentError("fixture failure"), None]
+        with self.assertRaisesRegex(deploy.DeploymentError, "previous release restored"):
+            deploy.deploy("b" * 40, archive())
+        self.assertEqual(self.current.resolve(), self.previous)
+        self.assertEqual(deploy.release_files(self.previous), deploy.PRE_ADMIN_FILES)
+        self.stop.assert_not_called()
+        self.assert_state_preserved()
+
+    def test_seven_file_rollback_preserves_admin_account(self):
+        account = self.base / "data" / "admin-account.json"
+        account.write_bytes(b'{"offline":"password hash fixture"}\n')
+        with patch.object(deploy, "command") as command:
+            deploy.deploy("b" * 40, archive(PRE_ADMIN_PAYLOAD.items()))
+        command.assert_not_called()
+        self.stop.assert_not_called()
+        self.assertEqual(deploy.release_files(self.target), deploy.PRE_ADMIN_FILES)
+        self.assertEqual(account.read_bytes(), b'{"offline":"password hash fixture"}\n')
         self.assert_state_preserved()
 
     def test_partial_existing_release_is_rejected_before_restart(self):

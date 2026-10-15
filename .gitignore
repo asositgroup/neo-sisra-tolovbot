@@ -8,3 +8,7 @@ release.tar.gz
 *.pem
 __pycache__/
 *.pyc
+.local/
+admin/dist/
+.playwright-mcp/
+.vercel/

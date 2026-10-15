@@ -13,6 +13,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 
+if os.name != "posix":
+    raise unittest.SkipTest("Deployment ownership, flock and service tests require Linux")
+
+
 SPEC = importlib.util.spec_from_file_location("server_poll", Path(__file__).resolve().parents[1] / "server-poll.py")
 poller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(poller)
@@ -55,6 +59,14 @@ class ArchiveTests(unittest.TestCase):
                 entries = [(path, content) for path, content in FILES.items() if path != name]
                 poller.snapshot_files(archive(entries), SHA)
 
+    def test_snapshot_requires_complete_admin_runtime_and_setup_tools(self):
+        for name in ("admin-server.cjs", "admin-auth.cjs", "admin-assets.cjs",
+                     "scripts/setup-admin.cjs", "scripts/admin-demo.cjs",
+                     "scripts/admin-personal-test.cjs"):
+            with self.subTest(name=name), self.assertRaises(poller.PollError):
+                entries = [(path, content) for path, content in FILES.items() if path != name]
+                poller.snapshot_files(archive(entries), SHA)
+
     def test_new_offline_test_files_are_included_without_adding_to_allowlist(self):
         new_tests = {
             "tests/state-store.test.cjs": b"SQLite tests",
@@ -70,6 +82,10 @@ class ArchiveTests(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(encoded), mode="r:gz") as result:
             names = set(result.getnames())
         self.assertNotIn("deploy/export-state.cjs", names)
+        self.assertNotIn("scripts/setup-admin.cjs", names)
+        self.assertNotIn("scripts/admin-demo.cjs", names)
+        self.assertNotIn("scripts/admin-personal-test.cjs", names)
+        self.assertTrue({"admin-server.cjs", "admin-auth.cjs", "admin-assets.cjs"}.issubset(names))
         self.assertTrue({"state-store.cjs", "work-queue.cjs", "telegram-queue.cjs"}.issubset(names))
 
     def test_unsafe_paths_and_duplicate_entries_rejected(self):
